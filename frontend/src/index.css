@@ -1,0 +1,175 @@
+:root {
+  /* Typography: a newspaper serif for headlines, a neutral grotesk for UI. */
+  --font-display: 'Newsreader', Georgia, 'Times New Roman', serif;
+  --font-heading: var(--font-display);
+  --font-body: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SFMono-Regular', Consolas, monospace;
+
+  /* Night desk palette: warm ink, parchment, rust and sage. */
+  --bg-primary: #111315;
+  --bg-surface: #17191c;
+  --bg-surface-elevated: #1c1f22;
+  --bg-card: #1a1d20;
+  --bg-subtle: #21252a;
+  --bg-hover: #262b30;
+  --bg-glass: #17191c;
+  --bg-inverse: #ece5d8;
+
+  --border-subtle: #2b3035;
+  --border-medium: #3e454c;
+  --border-strong: #5b6269;
+  --border-focus: #c9a87a;
+
+  --text-primary: #f0eadd;
+  --text-secondary: #b7b0a2;
+  --text-muted: #8a887f;
+  --text-inverse: #17191c;
+
+  --accent-primary: #cf6a52;
+  --accent-secondary: #8ca7a1;
+  --accent-gold: #c9a87a;
+  --accent-cyan: var(--accent-secondary);
+  --accent-blue: #6f8fa9;
+  --accent-purple: #92889b;
+  --accent-emerald: #7d987e;
+  --accent-rose: #bd7a72;
+  --accent-amber: #c19a58;
+  --accent-danger: #c96d63;
+  --accent-success: #7d987e;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.28);
+  --shadow-md: 0 6px 18px rgba(0, 0, 0, 0.28);
+  --shadow-lg: 0 24px 64px rgba(0, 0, 0, 0.46);
+  --shadow-glow-cyan: none;
+
+  --radius-sm: 2px;
+  --radius-md: 3px;
+  --radius-lg: 5px;
+  --radius-full: 9999px;
+
+  --blur-glass: none;
+  --transition-fast: 0.14s ease;
+  --transition-smooth: 0.24s cubic-bezier(0.2, 0.6, 0.2, 1);
+  color-scheme: dark;
+}
+
+:root[data-theme='light'] {
+  /* Morning edition palette: paper, ink, claret and petrol. */
+  --bg-primary: #ece5d8;
+  --bg-surface: #f3ede2;
+  --bg-surface-elevated: #faf6ed;
+  --bg-card: #f7f1e6;
+  --bg-subtle: #e8e0d2;
+  --bg-hover: #ded5c6;
+  --bg-glass: #f3ede2;
+  --bg-inverse: #1c1b18;
+
+  --border-subtle: #d8cfbf;
+  --border-medium: #bdb2a0;
+  --border-strong: #8d8271;
+  --border-focus: #8d3c34;
+
+  --text-primary: #1c1b18;
+  --text-secondary: #5e584e;
+  --text-muted: #6f695e;
+  --text-inverse: #f7f1e6;
+
+  --accent-primary: #8d3c34;
+  --accent-secondary: #335f5b;
+  --accent-gold: #8a6b32;
+  --accent-cyan: #335f5b;
+  --accent-blue: #446684;
+  --accent-purple: #72657c;
+  --accent-emerald: #557256;
+  --accent-rose: #9b5d55;
+  --accent-amber: #7f5b20;
+  --accent-danger: #9e443b;
+  --accent-success: #557256;
+
+  --shadow-sm: 0 1px 2px rgba(52, 44, 32, 0.08);
+  --shadow-md: 0 6px 20px rgba(52, 44, 32, 0.1);
+  --shadow-lg: 0 28px 70px rgba(52, 44, 32, 0.18);
+  --shadow-glow-cyan: none;
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+html {
+  background: var(--bg-primary);
+}
+
+body {
+  font-family: var(--font-body);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  overflow: hidden;
+  height: 100vh;
+  width: 100vw;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: 'kern' 1, 'liga' 1;
+}
+
+h1, h2, h3, h4, .font-heading {
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: -0.012em;
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+}
+
+::selection {
+  background: var(--accent-primary);
+  color: var(--bg-surface-elevated);
+}
+
+:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-medium);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-strong);
+}

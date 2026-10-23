@@ -1,0 +1,91 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gna-backend
+    environment:
+      DATA_DIR: /app/data
+      SEEDS_DIR: /app/seeds
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SNAPSHOT_REFRESH_SECONDS: ${SNAPSHOT_REFRESH_SECONDS:-60}
+      HF_TOKEN: ${HF_TOKEN:-}
+      HF_DATASET_REPO: ${HF_DATASET_REPO:-}
+      HF_PULL_SERVING: ${HF_PULL_SERVING:-true}
+      APP_BASE_URL: ${APP_BASE_URL:-http://127.0.0.1:8000}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://127.0.0.1:8000}
+      AUTH_SECRET: ${AUTH_SECRET:-}
+      AUTH_MIN_PASSWORD_LENGTH: ${AUTH_MIN_PASSWORD_LENGTH:-12}
+      AUTH_CHECK_BREACHED_PASSWORDS: ${AUTH_CHECK_BREACHED_PASSWORDS:-true}
+      AUTH_SESSION_ABSOLUTE_DAYS: ${AUTH_SESSION_ABSOLUTE_DAYS:-90}
+      AUTH_LOCKOUT_ATTEMPTS: ${AUTH_LOCKOUT_ATTEMPTS:-8}
+      AUTH_COOKIE_SAMESITE: ${AUTH_COOKIE_SAMESITE:-lax}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-}
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-auto}
+      EMAIL_FROM: "${EMAIL_FROM:-Globe News Atlas <no-reply@example.com>}"
+      EMAIL_REPLY_TO: ${EMAIL_REPLY_TO:-}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
+      SMTP_SSL: ${SMTP_SSL:-false}
+      SMTP_CA_FILE: ${SMTP_CA_FILE:-}
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    volumes:
+      - ./data:/app/data
+      - ./seeds:/app/seeds
+    restart: unless-stopped
+
+  pipeline:
+    build:
+      context: .
+      dockerfile: pipeline/Dockerfile
+    container_name: gna-pipeline
+    environment:
+      DATA_DIR: /app/data
+      SEEDS_DIR: /app/seeds
+      HF_TOKEN: ${HF_TOKEN:-}
+      HF_DATASET_REPO: ${HF_DATASET_REPO:-}
+      HF_DATASET_PRIVATE: ${HF_DATASET_PRIVATE:-true}
+      HF_PULL_BEFORE_RUN: ${HF_PULL_BEFORE_RUN:-true}
+      HF_PUSH_AFTER_RUN: ${HF_PUSH_AFTER_RUN:-true}
+      ENABLE_LLM_SUMMARIES: ${ENABLE_LLM_SUMMARIES:-true}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      ENABLE_OLLAMA: ${ENABLE_OLLAMA:-false}
+      REDDIT_CLIENT_ID: ${REDDIT_CLIENT_ID:-}
+      REDDIT_CLIENT_SECRET: ${REDDIT_CLIENT_SECRET:-}
+      REDDIT_USER_AGENT: ${REDDIT_USER_AGENT:-GlobeNewsAtlas/1.0}
+      GEONAMES_USERNAME: ${GEONAMES_USERNAME:-}
+      NEWSAPI_KEY: ${NEWSAPI_KEY:-}
+      ACLED_ACCESS_KEY: ${ACLED_ACCESS_KEY:-}
+      ACLED_EMAIL: ${ACLED_EMAIL:-}
+      RELIEFWEB_APPNAME: ${RELIEFWEB_APPNAME:-}
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
+      PIPELINE_INTERVAL_SECONDS: ${PIPELINE_INTERVAL_SECONDS:-900}
+    volumes:
+      - ./data:/app/data
+      - ./seeds:/app/seeds
+    command: sh -c "while true; do python -m pipeline.orchestration.flows; sleep $${PIPELINE_INTERVAL_SECONDS}; done"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: gna-ollama
+    profiles: ["ollama"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+
+volumes:
+  ollama_models:

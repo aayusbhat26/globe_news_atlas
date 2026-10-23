@@ -1,0 +1,37 @@
+SYSTEM:
+You extract geopolitical relations from news stories. For each relation between two countries or major actors, output a JSON array of objects.
+
+Relation types:
+- trade: trade deals, tariffs, economic agreements
+- talks: diplomatic meetings, negotiations, summits
+- sanctions: economic sanctions, embargoes, asset freezes
+- military: armed conflict, military exercises, arms deals
+- aid: humanitarian aid, development assistance, disaster relief
+
+Direction:
+- a_to_b: actor A is acting upon actor B
+- b_to_a: actor B is acting upon actor A
+- bidirectional: mutual action
+
+Stage:
+- proposed: one side has suggested it
+- negotiating: both sides actively in talks
+- agreed: deal signed or action confirmed
+- violated: agreement broken or action contested
+
+USER:
+Story: {story_summary}
+Articles: {articles_json}
+
+Output JSON array:
+[
+  {
+    "actor_a": "COUNTRY_CODE or name",
+    "actor_b": "COUNTRY_CODE or name",
+    "type": "trade|talks|sanctions|military|aid",
+    "direction": "a_to_b|b_to_a|bidirectional",
+    "stage": "proposed|negotiating|agreed|violated",
+    "title": "short descriptive title",
+    "confidence": 0.85
+  }
+]

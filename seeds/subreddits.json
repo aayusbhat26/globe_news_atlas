@@ -1,0 +1,51 @@
+[
+  {
+    "name": "worldnews",
+    "category": "general",
+    "weight": 1.0,
+    "min_score": 100,
+    "description": "Major global news stories"
+  },
+  {
+    "name": "news",
+    "category": "general",
+    "weight": 0.8,
+    "min_score": 100,
+    "description": "General news"
+  },
+  {
+    "name": "geopolitics",
+    "category": "geopolitics",
+    "weight": 1.0,
+    "min_score": 25,
+    "description": "In-depth geopolitical analysis and diplomatic developments"
+  },
+  {
+    "name": "europe",
+    "category": "regional",
+    "weight": 0.7,
+    "min_score": 50,
+    "description": "European news and current events"
+  },
+  {
+    "name": "anime_titties",
+    "category": "worldnews",
+    "weight": 0.9,
+    "min_score": 50,
+    "description": "Dedicated world politics discussion (despite the ironic name)"
+  },
+  {
+    "name": "indiaspeaks",
+    "category": "regional",
+    "weight": 0.6,
+    "min_score": 50,
+    "description": "Indian news and discussion"
+  },
+  {
+    "name": "ukraine",
+    "category": "conflict",
+    "weight": 0.8,
+    "min_score": 75,
+    "description": "Ukraine conflict tracking"
+  }
+]

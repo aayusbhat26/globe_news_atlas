@@ -1,0 +1,86 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+dist/
+.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment & Secrets
+.env
+.env.*
+
+# Database & local data
+*.sqlite3
+*.db
+data/bronze/*
+!data/bronze/.gitkeep
+data/silver/*
+!data/silver/.gitkeep
+data/gold/*
+!data/gold/.gitkeep
+data/snapshots/*
+!data/snapshots/.gitkeep
+data/feedback/*
+!data/feedback/.gitkeep
+data/dead_letter/*
+
+# IDE & OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+data/geo_cache/
+
+data/llm_usage.json
+data/source_usage.json
+
+# Reader account secrets and database
+data/auth/*
+!data/auth/.gitkeep
+
+# Local database certificates
+secrets/
+
+# Render import file
+render.env
+
+# Local-only documentation
+docs/
+Globe News Atlas Project Plan.*
+.env.example

@@ -1,0 +1,261 @@
+name: Globe News Atlas — CI & Scheduled Data Lake
+
+# The ingestion checkpoint runs at minute 50 of every hour. The final ten
+# minutes of each hour are reserved for transformation and the Hugging Face
+# upload. GitHub cron cannot express an arbitrary 50-minute period; for an
+# exact 50-minute trigger use an external scheduler to call workflow_dispatch
+# (the workflow still runs on GitHub-hosted runners).
+#
+# At 23:50 UTC the same workflow escalates to the daily tier, on Sundays to
+# the weekly tier, and on the final day of the month to the monthly tier.
+# The pipeline records the tier in gold/serving/manifest.json.
+
+on:
+  schedule:
+    - cron: '50 * * * *'
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: 'Extraction tier'
+        required: true
+        default: auto
+        type: choice
+        options:
+          - auto
+          - hourly
+          - daily
+          - weekly
+          - monthly
+  push:
+    branches: [master, main]
+
+concurrency:
+  group: globe-news-atlas-pipeline
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests and frontend build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            pipeline/requirements.txt
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt -r pipeline/requirements.txt
+
+      - name: Run backend and pipeline tests
+        run: PYTHONPATH=backend pytest backend/tests pipeline/tests -q
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+  ingest:
+    name: Extract, engineer and publish medallion data
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      DATA_DIR: ./data
+      ENVIRONMENT: production
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_DATASET_REPO: ${{ secrets.HF_DATASET_REPO }}
+      HF_STORAGE_TYPE: bucket
+      HF_DATASET_PRIVATE: 'true'
+      HF_PULL_BEFORE_RUN: 'true'
+      HF_PUSH_AFTER_RUN: 'true'
+      HF_PULL_DAYS: '30'
+      HF_PULL_SERVING: 'true'
+      HF_PUSH_CRAWL_TEXT: 'false'
+      HF_HUB_DISABLE_PROGRESS_BARS: '1'
+      ENABLE_CRAWLER: 'true'
+      CRAWLER_MAX_URLS: '120'
+      CRAWLER_PER_OUTLET: '8'
+      CRAWLER_SITEMAP_DAYS: '3'
+      CRAWLER_TIME_BUDGET_SECONDS: '180'
+      CRAWLER_RETENTION_DAYS: '14'
+      ENABLE_LLM_SUMMARIES: 'true'
+      MAX_LLM_SUMMARIES_PER_RUN: '8'
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      GROQ_MODEL: qwen/qwen3.8-27b
+      GROQ_RPM: '20'
+      GROQ_RPD: '1000'
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      OPENROUTER_FREE_MODELS: minimax/minimax-m3.1-flash:free,nvidia/nemotron-3.5-lightning:free,google/gemma-4-31b-it:free
+      OPENROUTER_RPM: '6'
+      OPENROUTER_RPD: '25'
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GEONAMES_USERNAME: ${{ secrets.GEONAMES_USERNAME }}
+      ENABLE_REMOTE_GEOCODING: 'true'
+      NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+      NEWSAPI_DAILY_LIMIT: '10'
+      ACLED_EMAIL: ${{ secrets.ACLED_EMAIL }}
+      ACLED_PASSWORD: ${{ secrets.ACLED_PASSWORD }}
+      RELIEFWEB_APPNAME: ${{ secrets.RELIEFWEB_APPNAME }}
+      REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+      REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+      REDDIT_USER_AGENT: 'GlobeNewsAtlas/1.0 (+https://github.com/aayusbhat26/project_1)'
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      GDELT_DOC_QUERIES: 'geopolitics|conflict OR ceasefire|economy OR markets|climate OR disaster'
+      GDELT_DOC_TIMESPAN: 24h
+      MAX_SNAPSHOT_EVENTS: '400'
+      MAX_SNAPSHOT_EVENTS_7D: '600'
+      MAX_SNAPSHOT_EVENTS_30D: '800'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: pipeline/requirements.txt
+
+      - name: Restore incremental data lake cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/bronze
+            data/silver
+            data/gold
+            data/feedback
+            data/llm_usage.json
+            data/source_usage.json
+          key: gna-lake-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            gna-lake-
+
+      - name: Install pipeline dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r pipeline/requirements.txt
+
+      - name: Detect extraction tier
+        id: tier
+        shell: bash
+        run: |
+          tier='${{ github.event.inputs.tier || 'auto' }}'
+          if [ "$tier" = "auto" ]; then
+            hour=$(date -u +%H)
+            weekday=$(date -u +%u)
+            tomorrow_day=$(date -u -d '+1 day' +%d)
+            if [ "$hour" = "23" ]; then
+              if [ "$tomorrow_day" = "01" ]; then
+                tier="monthly"
+              elif [ "$weekday" = "7" ]; then
+                tier="weekly"
+              else
+                tier="daily"
+              fi
+            else
+              tier="hourly"
+            fi
+          fi
+          echo "tier=$tier" >> "$GITHUB_OUTPUT"
+          echo "Extraction tier: $tier"
+
+      - name: Check storage secrets
+        shell: bash
+        run: |
+          if [ -z "$HF_TOKEN" ] || [ -z "$HF_DATASET_REPO" ]; then
+            echo "::error::Set HF_TOKEN and HF_DATASET_REPO in repository Actions secrets."
+            exit 1
+          fi
+
+      - name: Extract, engineer and push in one run
+        timeout-minutes: 15
+        env:
+          PIPELINE_TIER: ${{ steps.tier.outputs.tier }}
+        run: python -m pipeline.orchestration.flows
+
+      - name: Verify Parquet medallion layers and HF publication
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          manifest_path = Path('data/gold/serving/manifest.json')
+          if not manifest_path.exists():
+              raise SystemExit('No serving manifest was produced.')
+          manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+          print('run:', manifest.get('run_id'), 'tier:', manifest.get('tier'))
+          print('windows:', manifest.get('windows'))
+          print('hf_push:', manifest.get('hf_push'))
+          if not manifest.get('hf_push'):
+              raise SystemExit('Hugging Face push failed or was skipped.')
+
+          for window in ('24h', '7d', '30d'):
+              info = manifest.get('windows', {}).get(window, {})
+              if int(info.get('events') or 0) <= 0:
+                  raise SystemExit(f'Window {window} has no events.')
+          hourly = manifest.get('windows', {}).get('1h', {})
+          print('1h events (may be zero during a quiet hour):', hourly.get('events', 0))
+
+          invalid = []
+          for layer in ('bronze', 'silver', 'gold'):
+              for path in Path('data', layer).rglob('*'):
+                  if (
+                      path.is_file()
+                      and path.suffix != '.parquet'
+                      and 'serving' not in path.parts
+                  ):
+                      invalid.append(str(path))
+          if invalid:
+              raise SystemExit('Non-Parquet medallion files: ' + ', '.join(invalid[:10]))
+          print('Verified: all bronze/silver/gold data tables are Parquet.')
+          content_parts = list(Path('data/silver/article_content').rglob('*.parquet'))
+          print('crawled-text parts:', len(content_parts))
+          index_path = Path('data/gold/serving/search_index.sqlite3')
+          print('full-text index:', 'present' if index_path.is_file() else 'missing')
+          print('Serving JSON and the private FTS index are API read models; '
+                'crawl text is excluded from HF by default.')
+          PY
+
+      - name: Save incremental data lake cache
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/bronze
+            data/silver
+            data/gold
+            data/feedback
+            data/llm_usage.json
+            data/source_usage.json
+          key: gna-lake-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-diagnostics-${{ github.run_id }}
+          path: |
+            data/gold/serving/manifest.json
+            data/dead_letter/**
+            data/llm_usage.json
+            data/source_usage.json
+          if-no-files-found: ignore
+          retention-days: 7

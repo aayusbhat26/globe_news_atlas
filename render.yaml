@@ -1,0 +1,75 @@
+services:
+  - type: web
+    name: globe-news-atlas
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DATA_DIR
+        value: /app/data
+      - key: HF_TOKEN
+        sync: false
+      - key: HF_DATASET_REPO
+        sync: false
+      - key: HF_STORAGE_TYPE
+        value: bucket
+      - key: HF_PULL_SERVING
+        value: "true"
+      - key: HF_PULL_INTERVAL_SECONDS
+        value: "120"
+      - key: AUTH_SECRET
+        sync: false
+      - key: AUTH_COOKIE_SAMESITE
+        value: lax
+      - key: AUTH_DB_BACKEND
+        value: mysql
+      - key: AUTH_DB_HOST
+        sync: false
+      - key: AUTH_DB_PORT
+        value: "4000"
+      - key: AUTH_DB_NAME
+        value: globe_news_atlas
+      - key: AUTH_DB_USER
+        sync: false
+      - key: AUTH_DB_PASSWORD
+        sync: false
+      - key: AUTH_DB_SSL_CA_PEM_B64
+        sync: false
+      - key: AUTH_DB_POOL_SIZE
+        value: "5"
+      - key: APP_BASE_URL
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: EMAIL_PROVIDER
+        sync: false
+      - key: EMAIL_FROM
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USERNAME
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: BREVO_API_KEY
+        sync: false
+    # Accounts live in TiDB. A disk is optional and only caches HF serving
+    # JSON across restarts; it is not required for auth. Disks need a paid plan.
+    # disk:
+    #   name: atlas-data
+    #   mountPath: /app/data
+    #   sizeGB: 1

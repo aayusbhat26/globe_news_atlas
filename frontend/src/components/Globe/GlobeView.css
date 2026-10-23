@@ -1,0 +1,421 @@
+.globe-container {
+  width: 100vw;
+  height: 100vh;
+  position: absolute;
+  top: 0;
+  left: 0;
+  overflow: hidden;
+  background: var(--bg-primary);
+  cursor: grab;
+}
+
+.globe-container::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle at 50% 45%, rgba(255, 255, 255, 0.035), transparent 55%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+:root[data-theme='light'] .globe-container::before {
+  background: radial-gradient(circle at 50% 45%, rgba(255, 255, 255, 0.4), transparent 58%);
+}
+
+.globe-container:active {
+  cursor: grabbing;
+}
+
+.globe-canvas-wrapper {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  z-index: 1;
+}
+
+/* The texture carries its own editorial grade and boundary treatment. */
+
+/* ------------------------------------------------ event markers */
+.globe-marker {
+  --marker-ring: var(--bg-primary);
+  --marker-halo: rgba(0, 0, 0, 0.34);
+  width: var(--marker-size, 11px);
+  height: var(--marker-size, 11px);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  pointer-events: auto;
+  overflow: visible;
+  -webkit-tap-highlight-color: transparent;
+  transition: opacity var(--transition-fast);
+}
+
+:root[data-theme='light'] .globe-marker {
+  --marker-ring: var(--bg-surface-elevated);
+  --marker-halo: rgba(65, 54, 38, 0.35);
+}
+
+.globe-marker.is-hidden {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.globe-marker__dot {
+  width: var(--marker-size, 11px);
+  height: var(--marker-size, 11px);
+  border-radius: 50%;
+  background: var(--marker-color, #6f8fa9);
+  border: 1.5px solid var(--marker-ring);
+  box-shadow:
+    0 0 0 1px var(--marker-halo),
+    0 2px 5px rgba(0, 0, 0, 0.38);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  color: var(--marker-ink, #faf6ed);
+  font-family: var(--font-mono);
+  font-size: 8px;
+  line-height: 1;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+}
+
+.globe-marker__dot--count {
+  border-width: 2px;
+  font-size: 9px;
+}
+
+.globe-marker--key .globe-marker__dot {
+  box-shadow:
+    0 0 0 1px var(--marker-halo),
+    0 0 0 5px color-mix(in srgb, var(--marker-color) 20%, transparent),
+    0 2px 6px rgba(0, 0, 0, 0.42);
+}
+
+.globe-marker:hover .globe-marker__dot,
+.globe-marker:focus-visible .globe-marker__dot {
+  box-shadow:
+    0 0 0 1px var(--marker-halo),
+    0 0 0 5px color-mix(in srgb, var(--marker-color) 32%, transparent),
+    0 2px 8px rgba(0, 0, 0, 0.45);
+}
+
+.globe-marker:focus-visible {
+  outline: none;
+}
+
+/* ------------------------------------------------ map key */
+.globe-legend {
+  position: absolute;
+  bottom: 82px;
+  left: 24px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-medium);
+  border-top: 3px solid var(--accent-primary);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  z-index: 10;
+  box-shadow: var(--shadow-md);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  font-size: 0.66rem;
+  color: var(--text-secondary);
+  pointer-events: auto;
+  width: 238px;
+  max-height: min(470px, calc(100vh - 215px));
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.globe-legend__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--border-medium);
+}
+
+.globe-legend__heading {
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-primary);
+}
+
+.globe-legend__close {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  padding: 1px;
+}
+
+.globe-legend__close:hover {
+  color: var(--text-primary);
+}
+
+.globe-legend__title {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 0.53rem;
+  padding-top: 3px;
+}
+
+.globe-legend__items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+}
+
+.globe-legend__categories {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 5px 10px;
+}
+
+.globe-legend__item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.64rem;
+  color: var(--text-muted);
+  min-width: 0;
+}
+
+.globe-legend__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: 0 0 6px;
+}
+
+.globe-legend__arc-line {
+  width: 13px;
+  height: 1px;
+  flex: 0 0 13px;
+}
+
+.globe-legend__marker-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0 7px;
+  border-top: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font-size: 0.62rem;
+  line-height: 1.35;
+}
+
+.globe-legend__marker-sample {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  margin-right: 4px;
+}
+
+.globe-legend__marker-dot {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--accent-primary);
+  border: 2px solid var(--bg-surface);
+  box-shadow: 0 0 0 1px var(--border-strong);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--bg-surface-elevated);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  line-height: 1;
+  font-weight: 500;
+}
+
+.globe-legend__border-line {
+  width: 16px;
+  height: 0;
+  border-top: 1px solid var(--text-secondary);
+  display: inline-block;
+  flex: 0 0 16px;
+}
+
+.globe-legend__border-line--state {
+  border-top-color: var(--border-strong);
+  opacity: 0.65;
+}
+
+.globe-legend__border-line--disputed {
+  border-top: 1px dashed var(--accent-primary);
+}
+
+.globe-legend__swatch {
+  width: 12px;
+  height: 8px;
+  display: inline-block;
+  flex: 0 0 12px;
+  background: color-mix(in srgb, var(--accent-primary) 28%, transparent);
+  border: 1px dashed var(--accent-primary);
+}
+
+.globe-legend__note {
+  font-family: var(--font-mono);
+  font-size: 0.51rem;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.globe-legend-toggle {
+  position: absolute;
+  bottom: 82px;
+  left: 24px;
+  z-index: 10;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-medium);
+  border-left: 3px solid var(--accent-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  padding: 8px 12px;
+  font-family: var(--font-mono);
+  font-size: 0.56rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+}
+
+.globe-legend-toggle:hover {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+  border-left-color: var(--accent-primary);
+}
+
+@media (max-width: 720px) {
+  .globe-legend {
+    left: 12px;
+    right: 12px;
+    bottom: 100px;
+    width: auto;
+    max-height: min(52vh, 420px);
+    padding: 11px 13px;
+  }
+
+  .globe-legend-toggle {
+    left: 12px;
+    bottom: 100px;
+  }
+}
+
+/* ------------------------------------------------ geographic labels */
+.geo-label {
+  display: inline-block;
+  pointer-events: none;
+  user-select: none;
+  white-space: nowrap;
+  line-height: 1;
+  color: var(--text-primary);
+  text-shadow:
+    0 0 2px var(--bg-primary),
+    0 0 5px var(--bg-primary),
+    0 0 8px var(--bg-primary),
+    0 1px 2px rgba(0, 0, 0, 0.55);
+}
+
+:root[data-theme='light'] .geo-label {
+  text-shadow:
+    0 0 3px var(--bg-surface-elevated),
+    0 0 6px var(--bg-surface-elevated),
+    0 1px 1px rgba(255, 255, 255, 0.55);
+}
+
+.geo-label--country {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  opacity: 0.9;
+  pointer-events: auto;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: 2px;
+  padding: 3px 5px;
+  /* Country labels must stay above event markers so a nearby pin cannot
+     intercept the click that opens the country desk. */
+  z-index: 200 !important;
+  transition:
+    color var(--transition-fast),
+    background var(--transition-fast),
+    box-shadow var(--transition-fast),
+    opacity var(--transition-fast);
+}
+
+.geo-label--country:hover,
+.geo-label--country:focus-visible {
+  opacity: 1;
+  color: var(--accent-primary);
+  background: color-mix(in srgb, var(--bg-surface-elevated) 82%, transparent);
+  box-shadow: 0 0 0 1px var(--border-medium);
+  outline: none;
+}
+
+.geo-label--country.is-hidden:hover {
+  background: transparent;
+  box-shadow: none;
+}
+
+.geo-label--country.geo-label--active {
+  opacity: 1;
+  color: var(--accent-primary);
+  background: color-mix(in srgb, var(--bg-surface-elevated) 88%, transparent);
+  box-shadow:
+    inset 0 -2px 0 var(--accent-primary),
+    0 0 0 1px var(--border-medium);
+}
+
+:root[data-theme='light'] .geo-label--country:hover,
+:root[data-theme='light'] .geo-label--country:focus-visible,
+:root[data-theme='light'] .geo-label--country.geo-label--active {
+  background: color-mix(in srgb, var(--bg-surface-elevated) 90%, transparent);
+}
+
+.geo-label--state {
+  font-family: var(--font-body);
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 0.015em;
+  color: var(--text-primary);
+  opacity: 0.9;
+}
+
+.geo-label.is-hidden {
+  opacity: 0;
+  visibility: hidden;
+}
+
+@media (max-width: 720px) {
+  .geo-label--country {
+    font-size: 8.5px;
+    letter-spacing: 0.05em;
+  }
+  .geo-label--state {
+    font-size: 8.5px;
+  }
+}

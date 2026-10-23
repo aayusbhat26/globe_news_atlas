@@ -1,0 +1,264 @@
+.hover-card {
+  position: absolute;
+  top: 122px;
+  right: 24px;
+  width: 350px;
+  max-width: calc(100vw - 48px);
+  background: var(--bg-surface-elevated);
+  border: 1px solid var(--border-medium);
+  border-top: 3px solid var(--accent-primary);
+  border-radius: var(--radius-sm);
+  padding: 16px 18px 14px;
+  box-shadow: var(--shadow-lg);
+  z-index: 100;
+  cursor: pointer;
+  animation: hoverCardFadeIn 0.18s ease;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  pointer-events: auto;
+  transition: border-color var(--transition-fast), transform var(--transition-fast);
+}
+
+.hover-card:hover {
+  transform: translateY(-1px);
+  border-color: var(--border-strong);
+  border-top-color: var(--accent-primary);
+}
+
+@keyframes hoverCardFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.hover-card__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.hover-card__badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.category-badge {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border: 1px solid currentColor;
+  border-radius: 1px;
+  background: transparent;
+  line-height: 1.5;
+}
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 1px;
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+}
+
+.status-badge--breaking {
+  background: color-mix(in srgb, var(--accent-danger) 14%, transparent);
+  color: var(--accent-danger);
+}
+
+.status-badge--developing {
+  background: color-mix(in srgb, var(--accent-amber) 14%, transparent);
+  color: var(--accent-amber);
+}
+
+.status-badge--ongoing {
+  background: color-mix(in srgb, var(--accent-blue) 14%, transparent);
+  color: var(--accent-blue);
+}
+
+.status-badge--resolved {
+  background: color-mix(in srgb, var(--accent-success) 14%, transparent);
+  color: var(--accent-success);
+}
+
+.warning-badge {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 0.56rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--accent-danger) 12%, transparent);
+  color: var(--accent-danger);
+}
+
+.warning-badge--info {
+  background: color-mix(in srgb, var(--accent-blue) 12%, transparent);
+  color: var(--accent-blue);
+}
+
+.warning-badge--warn {
+  background: color-mix(in srgb, var(--accent-amber) 14%, transparent);
+  color: var(--accent-amber);
+}
+
+.hover-card__close {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  padding: 2px;
+  margin-top: -2px;
+}
+
+.hover-card__close:hover {
+  color: var(--text-primary);
+}
+
+.hover-card__title {
+  font-family: var(--font-display);
+  font-size: 1.16rem;
+  font-weight: 600;
+  line-height: 1.22;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+}
+
+.hover-card__summary {
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.hover-card__summary--empty {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.hover-card__location {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+}
+
+/* spectrum */
+.spectrum-mini {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-top: 9px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.spectrum-mini__bar {
+  display: flex;
+  height: 4px;
+  overflow: hidden;
+  background: var(--bg-subtle);
+}
+
+.spectrum-mini__segment--left {
+  background: #4F6F99;
+}
+.spectrum-mini__segment--centre {
+  background: #8B7A4E;
+}
+.spectrum-mini__segment--right {
+  background: #A65353;
+}
+
+.spectrum-mini__labels {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.spectrum-mini--empty {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-style: italic;
+  padding-top: 9px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.hover-card__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 9px;
+  border-top: 1px solid var(--border-subtle);
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+}
+
+.hover-card__footer > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hover-card__action {
+  flex-shrink: 0;
+  font-weight: 500;
+  color: var(--accent-primary);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  text-transform: uppercase;
+}
+
+@media (max-width: 720px) {
+  .hover-card {
+    top: 118px;
+    left: 12px;
+    right: 12px;
+    width: auto;
+    max-width: none;
+    max-height: 54vh;
+    overflow-y: auto;
+  }
+}
+
+@media (hover: none) {
+  .hover-card {
+    display: none;
+  }
+}
