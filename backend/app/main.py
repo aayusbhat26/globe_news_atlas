@@ -11,7 +11,7 @@ from urllib.parse import unquote
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from slowapi.middleware import SlowAPIMiddleware
 
@@ -162,6 +162,11 @@ async def health():
         "environment": settings.environment,
         "data": status,
     }
+
+
+@app.head("/health", include_in_schema=False)
+async def health_head() -> Response:
+    return Response(status_code=200)
 
 
 frontend_dist = Path(

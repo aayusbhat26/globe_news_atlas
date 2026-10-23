@@ -18,6 +18,9 @@ def test_health_check():
     assert data["status"] == "ok"
     assert "version" in data
     assert "data" in data
+    head = client.head("/health")
+    assert head.status_code == 200
+    assert head.content == b""
 
 
 def test_get_snapshot_default():
