@@ -1,0 +1,24 @@
+name: Keep alive
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: keepalive
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Ping the web service
+        run: |
+          curl --silent --show-error --fail \
+            --retry 3 --retry-delay 15 --retry-all-errors \
+            --max-time 150 \
+            https://globe-news-atlas.onrender.com/health
