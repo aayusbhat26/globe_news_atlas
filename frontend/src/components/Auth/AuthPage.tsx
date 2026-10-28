@@ -24,6 +24,7 @@ import {
   login,
   loginTwoFactor,
   googleStartUrl,
+  resendVerification,
   resetPassword,
   signup,
   verifyEmail,
@@ -131,8 +132,17 @@ export const AuthPage: React.FC<AuthPageProps> = ({ mode }) => {
   const [sentTo, setSentTo] = useState<string | null>(null);
   const [devLink, setDevLink] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [errorCode, setErrorCode] = useState<string | null>(null);
+  const [resendBusy, setResendBusy] = useState(false);
+  const [resendState, setResendState] = useState<{
+    tone: 'success' | 'error';
+    text: string;
+    link?: string;
+  } | null>(null);
 
-  const token = queryValue('token');
+  // Reset and verification links carry a one-time token. Read it into memory on
+  // the first render and strip it from the address bar and history immediately.
+  const [token] = useState<string | null>(() => queryValue('token'));
   const [tokenState, setTokenState] = useState<
     'idle' | 'checking' | 'valid' | 'invalid' | 'error'
   >(mode === 'verify' || mode === 'reset' ? 'checking' : 'idle');
@@ -146,8 +156,14 @@ export const AuthPage: React.FC<AuthPageProps> = ({ mode }) => {
   }, [copy.titleDocument]);
 
   useEffect(() => {
-    if (window.location.hash) {
-      replaceQuerySilently(`${window.location.pathname}${window.location.search}`);
+    const params = new URLSearchParams(window.location.search);
+    const hadToken = params.has('token');
+    params.delete('token');
+    const search = params.toString();
+    if (hadToken || window.location.hash) {
+      replaceQuerySilently(
+        `${window.location.pathname}${search ? `?${search}` : ''}`,
+      );
     }
   }, []);
 
@@ -176,6 +192,8 @@ export const AuthPage: React.FC<AuthPageProps> = ({ mode }) => {
   const submitLogin = async (event: React.FormEvent) => {
     event.preventDefault();
     setError(null);
+    setErrorCode(null);
+    setResendState(null);
     if (!isValidEmail(email)) {
       setError('Enter a valid email address.');
       return;
@@ -198,6 +216,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({ mode }) => {
       }
     } catch (err) {
       setError(errorMessage(err));
+      setErrorCode(err instanceof ApiError ? err.code : null);
     } finally {
       setBusy(false);
     }
@@ -341,6 +360,30 @@ export const AuthPage: React.FC<AuthPageProps> = ({ mode }) => {
     window.location.assign(googleStartUrl(nextPath.current));
   };
 
+  const emailNotVerified =
+    errorCode === 'email_not_verified'
+    || errorCode === 'email_unverified'
+    || errorCode === 'verification_required'
+    || Boolean(error && /confirm (your )?email|email (is )?(not|un)verified/i.test(error));
+
+  const handleResendVerification = async () => {
+    if (resendBusy) return;
+    setResendBusy(true);
+    setResendState(null);
+    try {
+      const result = await resendVerification(email.trim() || undefined);
+      setResendState({
+        tone: 'success',
+        text: result.message,
+        link: result.dev_verification_link || undefined,
+      });
+    } catch (err) {
+      setResendState({ tone: 'error', text: errorMessage(err) });
+    } finally {
+      setResendBusy(false);
+    }
+  };
+
   const renderHeader = (titleOverride?: string) => (
     <div className="auth-panel__header">
       <p className="auth-kicker auth-kicker--panel">{copy.eyebrow}</p>
@@ -389,6 +432,8 @@ export const AuthPage: React.FC<AuthPageProps> = ({ mode }) => {
               setChallenge(null);
               setCode('');
               setError(null);
+              setErrorCode(null);
+              setResendState(null);
             }}
           >
             <ArrowLeft size={14} aria-hidden="true" />
@@ -446,6 +491,33 @@ export const AuthPage: React.FC<AuthPageProps> = ({ mode }) => {
         <div className="auth-panel__inner">
           {renderHeader()}
           {error && <AuthNotice tone="error">{error}</AuthNotice>}
+          {emailNotVerified && (
+            <div className="auth-resend" role="group" aria-label="Confirm your email">
+              <p>
+                This account still needs a confirmed email address. Send a fresh
+                confirmation link to <strong>{email.trim() || 'your address'}</strong>.
+              </p>
+              <button
+                type="button"
+                className="auth-text-button"
+                onClick={handleResendVerification}
+                disabled={resendBusy}
+              >
+                {resendBusy ? 'Sending a new link…' : 'Resend confirmation email'}
+              </button>
+              {resendState && (
+                <AuthNotice tone={resendState.tone}>
+                  {resendState.text}
+                  {resendState.link && (
+                    <>
+                      {' '}
+                      <a href={resendState.link}>Open the confirmation link</a>.
+                    </>
+                  )}
+                </AuthNotice>
+              )}
+            </div>
+          )}
           {renderGoogle('Continue with Google')}
           <form className="auth-form" onSubmit={submitLogin} noValidate>
             <div className="auth-field">

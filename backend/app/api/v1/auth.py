@@ -22,6 +22,7 @@ from app.auth.security import (
     mask_email,
     now_ts,
 )
+from app.client_ip import get_client_ip
 from app.config import settings
 from app.middleware.rate_limit import limiter
 from app.schemas.auth import (
@@ -59,7 +60,8 @@ router = APIRouter(prefix="/auth")
 
 
 def _client_ip(request: Request) -> Optional[str]:
-    return request.client.host if request.client else None
+    # Trusted CF-Connecting-IP behind a proxy, else the socket peer. Never XFF.
+    return get_client_ip(request)
 
 
 def _user_agent(request: Request) -> Optional[str]:
@@ -409,6 +411,7 @@ def change_password(
         code=payload.code,
         ip=_client_ip(request),
         user_agent=_user_agent(request),
+        session_started_at=int(session.user["session_created_at"]),
     )
     return UserResponse(**result)
 
@@ -529,6 +532,7 @@ def enable_two_factor(
         code=payload.code,
         ip=_client_ip(request),
         user_agent=_user_agent(request),
+        session_id=session.session_id,
     )
     return TotpEnableResponse(**result)
 
@@ -702,6 +706,7 @@ def delete_account(
         code=payload.code,
         ip=_client_ip(request),
         user_agent=_user_agent(request),
+        session_started_at=int(session.user["session_created_at"]),
     )
     _clear_session_cookie(response)
     _set_csrf_cookie(response)

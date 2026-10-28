@@ -9,10 +9,13 @@ import {
 } from 'lucide-react';
 import { PageShell } from './PageShell';
 import { fetchPulse, fetchRewind } from '../../services/atlas';
+import { isAbortError } from '../../services/api';
 import { useTheme, useWebGLSupport } from '../../hooks/useTheme';
 import { formatRelativeTime } from '../../utils/time';
 import { navigate } from '../../router';
+import { LocationDispatch } from '../Cards/LocationDispatch';
 import type { PulseResponse, RewindResponse } from '../../types/atlas';
+import type { SnapshotEvent } from '../../types/snapshot';
 import './Rewind.css';
 
 const GlobeView = lazy(() =>
@@ -37,23 +40,67 @@ export const RewindPage: React.FC = () => {
   const [playing, setPlaying] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [reloadToken, setReloadToken] = useState(0);
+  const [pulseLoading, setPulseLoading] = useState(true);
+  const [pulseError, setPulseError] = useState<string | null>(null);
+  const [pulseToken, setPulseToken] = useState(0);
+  const [locationGroup, setLocationGroup] = useState<SnapshotEvent[] | null>(null);
+  const [webglLost, setWebglLost] = useState(false);
   const { isDark } = useTheme();
-  const hasWebGL = useWebGLSupport();
+  const hasWebGL = useWebGLSupport() && !webglLost;
 
   useEffect(() => {
-    Promise.all([fetchRewind(), fetchPulse('24h')])
-      .then(([rewind, pulseData]) => {
+    const controller = new AbortController();
+    let active = true;
+    setLoading(true);
+    setError(null);
+    fetchRewind(controller.signal)
+      .then((rewind) => {
+        if (!active) return;
         setData(rewind);
-        setPulse(pulseData);
         setIndex(Math.max(0, rewind.frames.length - 1));
       })
       .catch((err: unknown) => {
+        if (!active || isAbortError(err)) return;
         setError(err instanceof Error ? err.message : 'Could not load the replay archive.');
       })
-      .finally(() => setLoading(false));
-  }, []);
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [reloadToken]);
+
+  // Pulse is a separate request: a momentum failure must not hide the archive.
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    setPulseLoading(true);
+    setPulseError(null);
+    fetchPulse('24h', controller.signal)
+      .then((result) => {
+        if (active) setPulse(result);
+      })
+      .catch((err: unknown) => {
+        if (!active || isAbortError(err)) return;
+        setPulseError(err instanceof Error ? err.message : 'Momentum could not be read.');
+      })
+      .finally(() => {
+        if (active) setPulseLoading(false);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [pulseToken]);
 
   const frames = data?.frames || [];
+
+  useEffect(() => {
+    setLocationGroup(null);
+  }, [index]);
 
   useEffect(() => {
     if (!playing || frames.length < 2) return;
@@ -101,6 +148,13 @@ export const RewindPage: React.FC = () => {
         <div className="page-error" role="alert">
           <h2>The archive could not be read.</h2>
           <p>{error}</p>
+          <button
+            type="button"
+            className="page-secondary"
+            onClick={() => setReloadToken((token) => token + 1)}
+          >
+            Try again
+          </button>
         </div>
       ) : !data?.available || frames.length === 0 ? (
         <div className="page-empty">
@@ -123,13 +177,16 @@ export const RewindPage: React.FC = () => {
                     events={events}
                     arcs={frame?.arcs || []}
                     onEventHover={() => undefined}
-                    onEventClick={(id) => navigate(`/event/${id}`)}
-                    onLocationClick={() => undefined}
-                    onCountryClick={() => undefined}
+                    onEventClick={(id) => {
+                      setLocationGroup(null);
+                      navigate(`/event/${id}`);
+                    }}
+                    onLocationClick={(group) => setLocationGroup(group)}
                     activeCountry={null}
                     targetCoords={null}
                     isDark={isDark}
                     legendInitiallyOpen={false}
+                    onWebGLError={() => setWebglLost(true)}
                   />
                 </Suspense>
               ) : (
@@ -152,14 +209,42 @@ export const RewindPage: React.FC = () => {
                   {frame?.counts?.e ?? events.length} events · {frame?.counts?.a ?? frame?.arcs.length ?? 0} arcs
                 </span>
               </div>
+
+              {locationGroup && (
+                <LocationDispatch
+                  events={locationGroup}
+                  onSelect={(id) => {
+                    setLocationGroup(null);
+                    navigate(`/event/${id}`);
+                  }}
+                  onClose={() => setLocationGroup(null)}
+                />
+              )}
             </section>
 
             <aside className="rewind-pulse" aria-labelledby="rewind-pulse-title">
               <div className="rewind-pulse__head">
                 <h2 id="rewind-pulse-title">Heating up</h2>
-                <span>{pulse?.basis.frames || 0} frames compared</span>
+                <span>
+                  {pulseLoading
+                    ? 'Reading momentum…'
+                    : `${pulse?.basis.frames || 0} frames compared`}
+                </span>
               </div>
-              {!pulse?.items.length ? (
+              {pulseError ? (
+                <div className="rewind-pulse__error" role="alert">
+                  <p>{pulseError}</p>
+                  <button
+                    type="button"
+                    className="page-secondary"
+                    onClick={() => setPulseToken((token) => token + 1)}
+                  >
+                    Retry momentum
+                  </button>
+                </div>
+              ) : pulseLoading && !pulse ? (
+                <p className="rewind-pulse__empty">Reading the momentum desk…</p>
+              ) : !pulse?.items.length ? (
                 <p className="rewind-pulse__empty">
                   Momentum appears once two archived snapshots contain the same event.
                 </p>

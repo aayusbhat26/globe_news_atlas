@@ -150,6 +150,17 @@
   color: var(--text-muted);
 }
 
+.rewind-pulse__error {
+  padding: 18px 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  color: var(--accent-danger);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
 .rewind-pulse__note {
   padding: 10px 14px;
   border-top: 1px solid var(--border-subtle);

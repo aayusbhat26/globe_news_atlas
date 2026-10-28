@@ -32,12 +32,13 @@ class ReliefWebFetcher(BaseFetcher):
         self.session.headers.update({"User-Agent": "GlobeNewsAtlas/1.0 (ReliefWeb API)"})
 
     def fetch(self) -> List[Dict[str, Any]]:
+        self.begin_fetch()
         if self.is_circuit_open():
             logger.info("ReliefWeb fetch skipped: circuit breaker open.")
-            return []
+            return self.finish_fetch([], skipped_reason="circuit breaker open")
         if not self.appname:
             logger.info("ReliefWeb skipped: RELIEFWEB_APPNAME is not configured.")
-            return []
+            return self.finish_fetch([], skipped_reason="RELIEFWEB_APPNAME is not configured")
         payload = {
             "appname": self.appname,
             "profile": "list",
@@ -56,8 +57,7 @@ class ReliefWebFetcher(BaseFetcher):
             data = response.json().get("data", [])
         except Exception as exc:
             logger.warning("ReliefWeb fetch failed: %s", exc)
-            self.record_failure()
-            return []
+            return self.finish_fetch([], status="failed", error=f"{type(exc).__name__}: {exc}")
 
         records: List[Dict[str, Any]] = []
         for item in data:
@@ -96,9 +96,5 @@ class ReliefWebFetcher(BaseFetcher):
                 )
             )
 
-        if records:
-            self.record_success()
-        else:
-            self.record_failure()
         logger.info("ReliefWeb gathered %d reports", len(records))
-        return records
+        return self.finish_fetch(records)

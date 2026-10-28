@@ -26,3 +26,20 @@ export function formatRelativeTime(dateString?: string | null): string {
     return hours < 24 ? `${hours}h` : `${Math.round(hours / 24)}d`;
   }
 }
+
+/**
+ * A compact age without a trailing preposition, used inside copy that already
+ * supplies the wording ("last update {{time}} ago").
+ */
+export function formatAgeShort(dateString?: string | null): string {
+  if (!dateString) return i18n.t('time_unknown');
+  const date = new Date(dateString);
+  if (Number.isNaN(date.getTime())) return i18n.t('time_unknown');
+
+  const diffMinutes = Math.max(0, Math.round((Date.now() - date.getTime()) / 60000));
+  if (diffMinutes < 1) return 'moments';
+  if (diffMinutes < 60) return `${diffMinutes} min`;
+  const hours = Math.round(diffMinutes / 60);
+  if (hours < 24) return `${hours} hr`;
+  return `${Math.round(hours / 24)} d`;
+}

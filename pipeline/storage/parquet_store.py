@@ -8,6 +8,7 @@ across runs while still being queryable from DuckDB/pandas after decoding.
 """
 import json
 import logging
+import os
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
@@ -110,7 +111,29 @@ class LocalParquetStore:
 
         target = self.partition_dir(layer, table, partition_date) / f"part-{run_id}.parquet"
         target.parent.mkdir(parents=True, exist_ok=True)
-        frame.to_parquet(target, engine="pyarrow", index=False, compression="zstd")
+        temporary = target.with_name(target.name + ".tmp")
+        try:
+            frame.to_parquet(temporary, engine="pyarrow", index=False, compression="zstd")
+            # Validate before exposing the partition to readers. A truncated
+            # or schema-corrupt part is never promoted to the final filename.
+            written = pd.read_parquet(temporary)
+            if len(written) != len(frame):
+                raise ValueError(
+                    f"Parquet validation failed for {target.name}: "
+                    f"{len(written)} rows written, {len(frame)} expected"
+                )
+            missing = set(frame.columns) - set(written.columns)
+            if missing:
+                raise ValueError(
+                    f"Parquet validation failed for {target.name}: missing columns {sorted(missing)}"
+                )
+            os.replace(temporary, target)
+        except Exception:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
         logger.info("Wrote %d rows to %s", len(frame), target.relative_to(self.data_dir))
         return target
 

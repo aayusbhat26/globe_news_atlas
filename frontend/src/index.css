@@ -111,6 +111,20 @@
   border: 0;
 }
 
+/* Provenance marker for links resolved through a Google News redirect. */
+.via-google {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 0.48rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent-blue);
+  border: 1px solid color-mix(in srgb, var(--accent-blue) 45%, transparent);
+  padding: 0 3px;
+  white-space: nowrap;
+}
+
 html {
   background: var(--bg-primary);
 }

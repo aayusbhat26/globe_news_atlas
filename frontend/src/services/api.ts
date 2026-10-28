@@ -44,7 +44,14 @@ function readErrorPayload(payload: unknown, status: number): { code: string; mes
   return { code, message };
 }
 
-export async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
+export function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError';
+}
+
+async function performRequest(
+  path: string,
+  init?: RequestInit,
+): Promise<{ payload: unknown; headers: Headers; status: number }> {
   let response: Response;
   try {
     response = await fetch(`${API_BASE}${path}`, {
@@ -57,7 +64,7 @@ export async function requestJson<T>(path: string, init?: RequestInit): Promise<
     if (error instanceof DOMException && error.name === 'TimeoutError') {
       throw new ApiError(0, 'timeout', 'The server took too long to respond. Try again.');
     }
-    if (error instanceof DOMException && error.name === 'AbortError') {
+    if (isAbortError(error)) {
       throw error;
     }
     throw new ApiError(0, 'network_error', 'Could not reach the server. Check your connection.');
@@ -75,7 +82,24 @@ export async function requestJson<T>(path: string, init?: RequestInit): Promise<
     const { code, message } = readErrorPayload(payload, response.status);
     throw new ApiError(response.status, code, message);
   }
+  return { payload, headers: response.headers, status: response.status };
+}
+
+export async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const { payload } = await performRequest(path, init);
   return payload as T;
+}
+
+/**
+ * Same contract as requestJson, but keeps the response headers. Used where the
+ * API reports a true result total alongside a capped payload.
+ */
+export async function requestJsonWithMeta<T>(
+  path: string,
+  init?: RequestInit,
+): Promise<{ data: T; headers: Headers; status: number }> {
+  const { payload, headers, status } = await performRequest(path, init);
+  return { data: payload as T, headers, status };
 }
 
 export interface FeedbackPayload {
@@ -94,8 +118,13 @@ export function submitFeedback(
   });
 }
 
-export function fetchSnapshot(window: string = '24h'): Promise<SnapshotResponse> {
-  return requestJson<SnapshotResponse>(`/snapshot?window=${encodeURIComponent(window)}`);
+export function fetchSnapshot(
+  window: string = '24h',
+  signal?: AbortSignal,
+): Promise<SnapshotResponse> {
+  return requestJson<SnapshotResponse>(`/snapshot?window=${encodeURIComponent(window)}`, {
+    signal,
+  });
 }
 
 export function fetchCountryBrief(
@@ -117,23 +146,58 @@ export function fetchEventDetail(eventId: string): Promise<EventDetailData> {
   return requestJson<EventDetailData>(`/events/${encodeURIComponent(eventId)}`);
 }
 
-export function fetchSearchResults(
+export interface SearchResponse {
+  items: SearchApiResult[];
+  /** True archive total when the API sends X-Total-Count; null when it does not. */
+  total: number | null;
+}
+
+export async function fetchSearchResults(
   query: string,
   window: string = '30d',
   limit: number = 20,
   signal?: AbortSignal,
-): Promise<SearchApiResult[]> {
+): Promise<SearchResponse> {
   const params = new URLSearchParams({ q: query, window, limit: String(limit) });
-  return requestJson<SearchApiResult[]>(`/search?${params.toString()}`, { signal });
+  const { data, headers } = await requestJsonWithMeta<SearchApiResult[]>(
+    `/search?${params.toString()}`,
+    { signal },
+  );
+  const rawTotal = headers.get('X-Total-Count');
+  const parsed = rawTotal != null && rawTotal.trim() !== '' ? Number(rawTotal) : NaN;
+  return {
+    items: Array.isArray(data) ? data : [],
+    total: Number.isFinite(parsed) && parsed >= 0 ? parsed : null,
+  };
 }
 
-export function subscribeToUpdates(onUpdate: () => void): () => void {
-  if (typeof EventSource === 'undefined') return () => {};
-  const source = new EventSource(`${API_BASE}/stream`);
+export function subscribeToUpdates(
+  onUpdate: () => void,
+  onStatus?: (connected: boolean) => void,
+): () => void {
+  if (typeof EventSource === 'undefined') {
+    onStatus?.(false);
+    return () => {};
+  }
+  let source: EventSource;
+  try {
+    source = new EventSource(`${API_BASE}/stream`);
+  } catch {
+    onStatus?.(false);
+    return () => {};
+  }
   const handleUpdate = () => onUpdate();
+  const handleOpen = () => onStatus?.(true);
+  const handleError = () => onStatus?.(false);
   source.addEventListener('snapshot_updated', handleUpdate);
+  source.addEventListener('open', handleOpen);
+  source.addEventListener('error', handleError);
+  source.onopen = handleOpen;
+  source.onerror = handleError;
   return () => {
     source.removeEventListener('snapshot_updated', handleUpdate);
+    source.removeEventListener('open', handleOpen);
+    source.removeEventListener('error', handleError);
     source.close();
   };
 }

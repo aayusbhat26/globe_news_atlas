@@ -31,8 +31,17 @@ def outlet_key(article: Dict[str, Any]) -> str:
     ).strip().lower()
 
 
+def is_google_news(article: Dict[str, Any]) -> bool:
+    metadata = article.get("source_metadata") if isinstance(article.get("source_metadata"), dict) else {}
+    return bool(
+        article.get("via_google_news")
+        or article.get("source") == "google_news"
+        or metadata.get("via_google_news")
+    )
+
+
 def representative_articles(articles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """One article per syndication group, preferring real outlet reports."""
+    """One article per syndication group, preferring direct publisher links."""
     groups: Dict[str, Dict[str, Any]] = {}
     for index, article in enumerate(articles):
         group = (
@@ -49,6 +58,14 @@ def representative_articles(articles: List[Dict[str, Any]]) -> List[Dict[str, An
         current_coded = _text(current.get("source")) in CODED_SOURCES
         candidate_coded = _text(article.get("source")) in CODED_SOURCES
         if current_coded and not candidate_coded:
+            groups[group] = article
+        elif (
+            current_coded == candidate_coded
+            and is_google_news(current)
+            and not is_google_news(article)
+        ):
+            # A direct SCMP/Prothom Alo link is preferable to its Google News
+            # redirect for the same story.
             groups[group] = article
         elif current_coded == candidate_coded and (
             _text(article.get("published_at")) < _text(current.get("published_at"))
@@ -92,15 +109,48 @@ class CoverageAnalyser:
             spectrum[alignment] += 1
 
         rated = spectrum["left"] + spectrum["centre"] + spectrum["right"]
-        has_gap = rated >= 2 and (
-            (spectrum["left"] >= 2 and spectrum["right"] == 0)
-            or (spectrum["right"] >= 2 and spectrum["left"] == 0)
+        distinct = len(seen_outlets)
+        rated_share = (rated / distinct) if distinct else 0.0
+        dominant = max(spectrum["left"], spectrum["right"])
+        dominant_share = (dominant / rated) if rated else 0.0
+        one_sided = (
+            rated >= 3
+            and rated_share >= 0.5
+            and dominant >= 2
+            and min(spectrum["left"], spectrum["right"]) == 0
+            and dominant_share >= 0.6
         )
+        # Keep the backend's boolean meaning coherent: a gap exists only when
+        # enough rated outlets exist to judge it and one wing dominates the
+        # rated coverage. 21 unrated outlets must not turn 2 left/1 centre into
+        # a "one-sided" story.
+        has_gap = one_sided
+
+        if has_gap:
+            gap_side = "left" if spectrum["left"] > spectrum["right"] else "right"
+            gap_reason = (
+                f"{gap_side}-rated outlets only ({spectrum[gap_side]} of "
+                f"{rated} rated outlets); no opposite-side coverage."
+            )
+        elif distinct and rated_share < 0.5:
+            gap_reason = (
+                f"Insufficient rated coverage to judge a gap "
+                f"({rated}/{distinct} distinct outlets rated)."
+            )
+        elif rated < 3:
+            gap_reason = f"Not enough rated outlets to judge a gap ({rated} rated)."
+        elif dominant_share < 0.6:
+            gap_reason = "Rated coverage includes substantial centre reporting; no one-sided gap."
+        else:
+            gap_reason = "Coverage includes both left- and right-rated outlets."
 
         return {
             "spectrum": spectrum,
-            "distinct_outlets": len(seen_outlets),
+            "distinct_outlets": distinct,
+            "rated_outlets": rated,
+            "rated_share": round(rated_share, 2),
             "has_coverage_gap": has_gap,
+            "coverage_gap_reason": gap_reason,
             "has_official_source": official,
             "source_count": len(reps),
         }

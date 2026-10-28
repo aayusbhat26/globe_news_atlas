@@ -1,8 +1,10 @@
 from slowapi import Limiter
-from slowapi.util import get_remote_address
+
+from app.client_ip import rate_limit_key
 
 limiter = Limiter(
-    key_func=get_remote_address,
+    # Never key on X-Forwarded-For: it is client-controlled. See client_ip.py.
+    key_func=rate_limit_key,
     default_limits=["100/minute"],
     storage_uri="memory://",
 )

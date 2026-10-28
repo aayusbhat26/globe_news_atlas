@@ -223,17 +223,22 @@ class RedditFetcher(BaseFetcher):
         return []
 
     def fetch(self) -> List[Dict[str, Any]]:
+        self.begin_fetch()
         if self.is_circuit_open():
             logger.info("Reddit fetch skipped: circuit breaker open.")
-            return []
+            return self.finish_fetch([], skipped_reason="circuit breaker open")
 
+        subreddits = self._load_subreddits()
+        if not subreddits:
+            return self.finish_fetch([], skipped_reason="no subreddits configured")
         records: List[Dict[str, Any]] = []
         seen: set = set()
+        feed_errors: Dict[str, str] = {}
         public_blocked = False
         rss_blocked = False
         oauth_enabled = bool(self.client_id and self.client_secret)
         pullpush_blocked = False
-        for sub in self._load_subreddits():
+        for sub in subreddits:
             name = sub["name"]
             min_score = int(sub.get("min_score", settings.reddit_min_score))
             posts: List[Dict[str, Any]] = []
@@ -242,23 +247,28 @@ class RedditFetcher(BaseFetcher):
                     posts = self._from_oauth(name)
                 except Exception as exc:
                     logger.warning("Reddit OAuth fetch failed for r/%s: %s", name, exc)
+                    feed_errors[f"{name}:oauth"] = f"{type(exc).__name__}: {exc}"[:160]
                     oauth_enabled = False
             if not posts and not oauth_enabled and not public_blocked:
                 try:
                     posts = self._from_public(name)
                 except PermissionError as exc:
                     logger.warning("Reddit public endpoint unavailable (%s); switching to PullPush.", exc)
+                    feed_errors[f"{name}:public"] = f"blocked: {exc}"[:160]
                     public_blocked = True
                 except Exception as exc:
                     logger.warning("Reddit public fetch failed for r/%s: %s", name, exc)
+                    feed_errors[f"{name}:public"] = f"{type(exc).__name__}: {exc}"[:160]
             if not posts and not oauth_enabled and not rss_blocked:
                 try:
                     posts = self._from_rss(name)
                 except PermissionError as exc:
                     rss_blocked = True
+                    feed_errors[f"{name}:rss"] = f"blocked: {exc}"[:160]
                     logger.warning("Reddit RSS unavailable (%s); trying PullPush.", exc)
                 except Exception as exc:
                     logger.warning("Reddit RSS failed for r/%s: %s", name, exc)
+                    feed_errors[f"{name}:rss"] = f"{type(exc).__name__}: {exc}"[:160]
             if not posts and not oauth_enabled and not rss_blocked and not pullpush_blocked:
                 posts = self._from_pullpush(name)
                 if not posts:
@@ -299,9 +309,18 @@ class RedditFetcher(BaseFetcher):
                 )
             time.sleep(min(settings.host_delay_seconds, 1.0))
 
-        if records:
-            self.record_success()
-        else:
-            self.record_failure()
         logger.info("Reddit gathered %d posts", len(records))
-        return records
+        if records:
+            return self.finish_fetch(
+                records,
+                status="partial" if feed_errors else "ok",
+                feed_errors=feed_errors,
+            )
+        if feed_errors and len(feed_errors) >= len(subreddits):
+            return self.finish_fetch(
+                records,
+                status="failed",
+                error="every Reddit backend failed",
+                feed_errors=feed_errors,
+            )
+        return self.finish_fetch(records, status="empty", feed_errors=feed_errors)

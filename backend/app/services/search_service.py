@@ -2,7 +2,7 @@ import logging
 import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from app.schemas.search import SearchResult
 from app.services.snapshot_service import snapshot_service
@@ -29,7 +29,7 @@ class SearchService:
         category: Optional[str],
         window: str,
         limit: int,
-    ) -> Optional[List[SearchResult]]:
+    ) -> Optional[Tuple[List[SearchResult], int]]:
         index_path = snapshot_service.root / "search_index.sqlite3"
         if not index_path.is_file():
             return None
@@ -45,27 +45,31 @@ class SearchService:
         if match:
             clauses.insert(0, "events_fts MATCH ?")
             params.insert(0, match)
-        params.append(max(1, min(limit, MAX_RESULTS)))
+        where = " AND ".join(clauses)
         order = "bm25(events_fts), CAST(importance AS REAL) DESC" if match else "CAST(importance AS REAL) DESC, updated_at DESC"
         sql = f"""
             SELECT event_id, title, category, lat, lng, importance, status,
                    outlet_count, summary, location, updated_at
             FROM events_fts
-            WHERE {' AND '.join(clauses)}
+            WHERE {where}
             ORDER BY {order}
             LIMIT ?
         """
+        count_sql = f"SELECT COUNT(*) FROM events_fts WHERE {where}"
         try:
             connection = sqlite3.connect(f"file:{index_path}?mode=ro", uri=True, timeout=2)
             try:
-                rows = connection.execute(sql, params).fetchall()
+                total = int(connection.execute(count_sql, params).fetchone()[0] or 0)
+                rows = connection.execute(
+                    sql, [*params, max(1, min(limit, MAX_RESULTS))]
+                ).fetchall()
             finally:
                 connection.close()
         except sqlite3.Error as exc:
             logger.warning("Full-text index unavailable, using snapshot fallback: %s", exc)
             return None
 
-        return [
+        results = [
             SearchResult(
                 id=str(row[0] or ""),
                 title=str(row[1] or ""),
@@ -81,14 +85,16 @@ class SearchService:
             )
             for row in rows
         ]
+        return results, total
 
-    def search_events(
+    def search_events_with_total(
         self,
         query: str,
         category: Optional[str] = None,
         window: str = "30d",
         limit: int = 20,
-    ) -> List[SearchResult]:
+    ) -> Tuple[List[SearchResult], int]:
+        """Return the capped page plus the true number of matches."""
         if window not in WINDOW_MINUTES:
             window = "30d"
         indexed = self._search_index(query, category, window, limit)
@@ -124,8 +130,21 @@ class SearchService:
                 )
             )
 
+        total = len(results)
         results.sort(key=lambda result: result.importance, reverse=True)
-        return results[: max(1, min(limit, MAX_RESULTS))]
+        return results[: max(1, min(limit, MAX_RESULTS))], total
+
+    def search_events(
+        self,
+        query: str,
+        category: Optional[str] = None,
+        window: str = "30d",
+        limit: int = 20,
+    ) -> List[SearchResult]:
+        results, _ = self.search_events_with_total(
+            query=query, category=category, window=window, limit=limit
+        )
+        return results
 
 
 search_service = SearchService()

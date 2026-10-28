@@ -1,6 +1,7 @@
 from app.schemas.event import (
     HoverCardResponse,
     EventDetailResponse,
+    EventSourceItem,
     CoverageColumn,
     SpectrumBar,
     TimelineEntry,
@@ -11,6 +12,7 @@ from app.schemas.search import OutletResponse, SearchQuery, SearchResult
 __all__ = [
     "HoverCardResponse",
     "EventDetailResponse",
+    "EventSourceItem",
     "CoverageColumn",
     "SpectrumBar",
     "TimelineEntry",

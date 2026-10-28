@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
+from app.client_ip import clean_client_ip
 from app.config import settings
 from app.auth.database import MySQLBackend
 from app.auth.security import now_ts
@@ -134,6 +135,15 @@ CREATE TABLE IF NOT EXISTS reader_prefs (
     user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     watchline_seen_at INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS feedback (
+    id TEXT PRIMARY KEY,
+    event_id TEXT,
+    category TEXT NOT NULL,
+    details TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS feedback_created_idx ON feedback(created_at DESC);
 """
 
 # MySQL/TiDB DDL is intentionally index-inline: MySQL has no CREATE INDEX IF
@@ -278,6 +288,17 @@ _MYSQL_TABLES = (
         PRIMARY KEY (user_id)
     ) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
     """,
+    """
+    CREATE TABLE IF NOT EXISTS feedback (
+        id VARCHAR(64) NOT NULL,
+        event_id VARCHAR(200) NULL,
+        category VARCHAR(32) NOT NULL,
+        details TEXT NOT NULL,
+        created_at BIGINT NOT NULL,
+        PRIMARY KEY (id),
+        KEY feedback_created_idx (created_at)
+    ) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
+    """,
 )
 
 _user_columns = """
@@ -312,6 +333,15 @@ class AuthStore:
 
     def ensure_ready(self) -> None:
         self._ensure_schema()
+
+    def ping(self) -> bool:
+        """Cheap readiness probe for the account database."""
+        try:
+            with self.connection() as conn:
+                conn.execute("SELECT 1").fetchone()
+            return True
+        except Exception:
+            return False
 
     def reset_runtime_state(self) -> None:
         """Test helper: forget schema markers and pooled connections."""
@@ -446,17 +476,41 @@ class AuthStore:
                 (password_hash, now_ts(), user_id),
             )
 
-    def record_login_failure(
-        self, user_id: str, failed_count: int, locked_until: Optional[int]
-    ) -> None:
+    def increment_login_failure(
+        self, user_id: str, lockout_attempts: int
+    ) -> tuple[int, Optional[int]]:
+        """Atomically count one failure and return (count, locked_until).
+
+        The read-modify-write happens inside a single transaction so parallel
+        login attempts cannot overwrite each other's counter.
+        """
+        timestamp = now_ts()
         with self.connection() as conn:
             conn.execute(
                 """
-                UPDATE users SET failed_login_count = ?, locked_until = ?,
+                UPDATE users SET failed_login_count = failed_login_count + 1,
                     updated_at = ? WHERE id = ?
                 """,
-                (failed_count, locked_until, now_ts(), user_id),
+                (timestamp, user_id),
             )
+            row = conn.execute(
+                "SELECT failed_login_count, locked_until FROM users WHERE id = ?",
+                (user_id,),
+            ).fetchone()
+            failed = int(row["failed_login_count"]) if row else 0
+            current_lock = int(row["locked_until"]) if row and row["locked_until"] else None
+            if current_lock and current_lock > timestamp:
+                return failed, current_lock
+            lock_until: Optional[int] = None
+            threshold = max(1, int(lockout_attempts))
+            if failed >= threshold:
+                exponent = min(failed - threshold, 6)
+                lock_until = timestamp + min(3600, 60 * (2 ** exponent))
+                conn.execute(
+                    "UPDATE users SET locked_until = ? WHERE id = ?",
+                    (lock_until, user_id),
+                )
+            return failed, lock_until
 
     def record_login_success(self, user_id: str) -> None:
         timestamp = now_ts()
@@ -520,7 +574,7 @@ class AuthStore:
                     token_hash,
                     auth_method,
                     1 if remember else 0,
-                    ip,
+                    clean_client_ip(ip),
                     (user_agent or "")[:400] or None,
                     timestamp,
                     timestamp,
@@ -650,6 +704,32 @@ class AuthStore:
                 (now_ts(), token_id, user_id),
             )
             return cursor.rowcount > 0
+
+    def invalidate_auth_tokens(
+        self, user_id: str, purposes: Optional[list[str]] = None
+    ) -> int:
+        """Retire outstanding one-time email tokens after a password change."""
+        timestamp = now_ts()
+        with self.connection() as conn:
+            if purposes:
+                placeholders = ", ".join("?" for _ in purposes)
+                cursor = conn.execute(
+                    f"""
+                    UPDATE auth_tokens SET used_at = ?
+                    WHERE user_id = ? AND used_at IS NULL
+                        AND purpose IN ({placeholders})
+                    """,
+                    (timestamp, user_id, *purposes),
+                )
+            else:
+                cursor = conn.execute(
+                    """
+                    UPDATE auth_tokens SET used_at = ?
+                    WHERE user_id = ? AND used_at IS NULL
+                    """,
+                    (timestamp, user_id),
+                )
+            return cursor.rowcount
 
     def last_auth_token_at(self, user_id: str, purpose: str) -> Optional[int]:
         with self.connection() as conn:
@@ -787,7 +867,7 @@ class AuthStore:
                     token_hash,
                     user_id,
                     1 if remember else 0,
-                    ip,
+                    clean_client_ip(ip),
                     (user_agent or "")[:400] or None,
                     timestamp,
                     expires_at,
@@ -817,6 +897,14 @@ class AuthStore:
                 (token_hash,),
             ).fetchone()
             return int(row["attempts"]) if row else 0
+
+    def consume_login_challenge(self, token_hash: str) -> bool:
+        """Atomically consume a challenge; only one caller may succeed."""
+        with self.connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM login_challenges WHERE token_hash = ?", (token_hash,)
+            )
+            return cursor.rowcount > 0
 
     def delete_login_challenge(self, token_hash: str) -> None:
         with self.connection() as conn:
@@ -873,11 +961,22 @@ class AuthStore:
             )
             conn.execute("DELETE FROM recovery_codes WHERE user_id = ?", (user_id,))
 
-    def set_totp_step(self, user_id: str, step: int) -> None:
+    def claim_totp_step(self, user_id: str, step: int) -> bool:
+        """Advance the TOTP watermark exactly once for a given step."""
         with self.connection() as conn:
-            conn.execute(
-                "UPDATE users SET totp_last_step = ? WHERE id = ?", (step, user_id)
+            cursor = conn.execute(
+                """
+                UPDATE users SET totp_last_step = ?, updated_at = ?
+                WHERE id = ?
+                    AND (totp_last_step IS NULL OR totp_last_step < ?)
+                """,
+                (step, now_ts(), user_id, step),
             )
+            return cursor.rowcount > 0
+
+    def set_totp_step(self, user_id: str, step: int) -> bool:
+        """Backwards-compatible alias for the atomic claim operation."""
+        return self.claim_totp_step(user_id, step)
 
     def replace_recovery_codes(self, user_id: str, hashes: list[str]) -> None:
         timestamp = now_ts()
@@ -1008,7 +1107,7 @@ class AuthStore:
                     uuid.uuid4().hex,
                     user_id,
                     event,
-                    ip,
+                    clean_client_ip(ip),
                     (user_agent or "")[:400] or None,
                     json.dumps(metadata or {}, ensure_ascii=False),
                     now_ts(),
@@ -1036,6 +1135,25 @@ class AuthStore:
                 (user_id,),
             ).fetchone()
             return int(row["total"]) if row else 0
+
+    # ── feedback ─────────────────────────────────────────────────────
+
+    def save_feedback(
+        self,
+        report_id: str,
+        event_id: Optional[str],
+        category: str,
+        details: str,
+    ) -> None:
+        """Persist only reporter-supplied fields (no IP or user agent)."""
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO feedback (id, event_id, category, details, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (report_id, event_id, category, details, now_ts()),
+            )
 
 
 auth_store = AuthStore()

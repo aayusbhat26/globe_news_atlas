@@ -6,6 +6,8 @@ services:
     region: singapore
     dockerfilePath: ./Dockerfile
     dockerContext: .
+    # Liveness only. /ready (data readiness) is added by the backend and must
+    # not be used here, or a cold HF pull would make Render restart the service.
     healthCheckPath: /health
     autoDeployTrigger: commit
     envVars:
@@ -13,6 +15,23 @@ services:
         value: production
       - key: DATA_DIR
         value: /app/data
+      - key: SEEDS_DIR
+        value: /app/seeds
+      # Render terminates TLS and Cloudflare may sit in front. The backend only
+      # trusts CF-Connecting-IP when this is true; Uvicorn proxy headers are
+      # deliberately disabled in the Dockerfile.
+      - key: TRUST_PROXY_HEADERS
+        value: "true"
+      # Host header allow-list consumed by the backend's TrustedHostMiddleware.
+      # RENDER_EXTERNAL_HOSTNAME is appended automatically; add any custom
+      # Cloudflare domain here as well.
+      - key: ALLOWED_HOSTS
+        value: globe-news-atlas.onrender.com
+      # settings.allowed_origins is a JSON list. The SPA is served same-origin,
+      # so this matters only for a separately hosted frontend. Update it if a
+      # custom domain replaces the onrender.com origin.
+      - key: ALLOWED_ORIGINS
+        value: '["https://globe-news-atlas.onrender.com"]'
       - key: HF_TOKEN
         sync: false
       - key: HF_DATASET_REPO

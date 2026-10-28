@@ -6,6 +6,11 @@ name: Globe News Atlas — CI & Scheduled Data Lake
 # exact 50-minute trigger use an external scheduler to call workflow_dispatch
 # (the workflow still runs on GitHub-hosted runners).
 #
+# GitHub's schedule trigger is best-effort: runs can start late, be delayed by
+# tens of minutes, or be dropped. Keep the hourly cron as the fallback, but an
+# external scheduler should call workflow_dispatch (passing the boundary tier
+# explicitly when it can) for reliable delivery. Tests always gate ingestion.
+#
 # At 23:50 UTC the same workflow escalates to the daily tier, on Sundays to
 # the weekly tier, and on the final day of the month to the monthly tier.
 # The pipeline records the tier in gold/serving/manifest.json.
@@ -16,8 +21,9 @@ on:
   workflow_dispatch:
     inputs:
       tier:
-        description: 'Extraction tier'
-        required: true
+        description: 'Extraction tier (auto derives it from the scheduled slot)'
+        # Optional so an external scheduler can dispatch without arguments.
+        required: false
         default: auto
         type: choice
         options:
@@ -26,6 +32,8 @@ on:
           - daily
           - weekly
           - monthly
+  pull_request:
+    branches: [master, main]
   push:
     branches: [master, main]
 
@@ -39,10 +47,20 @@ permissions:
 jobs:
   test:
     name: Tests and frontend build
-    if: github.event_name == 'push'
+    # Runs on every trigger, including schedule and workflow_dispatch, so the
+    # ingest job below cannot publish data from untested code.
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    outputs:
+      # Workflow start time, used by the ingest job to pick the intended cron
+      # slot without the test runtime shifting a boundary run into the next hour.
+      slot_epoch: ${{ steps.slot.outputs.epoch }}
     steps:
+      - name: Record workflow start time
+        id: slot
+        shell: bash
+        run: echo "epoch=$(date -u +%s)" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
@@ -73,9 +91,24 @@ jobs:
           npm ci --no-audit --no-fund
           npm run build
 
+  docker:
+    name: Docker image build
+    needs: test
+    # Code changes are covered by push/PR/dispatch. Skip the hourly data-only
+    # schedule so CI does not rebuild the same image every hour.
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build production image without secrets
+        run: docker build -t globe-news-atlas:ci .
+
   ingest:
     name: Extract, engineer and publish medallion data
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: test
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -155,16 +188,40 @@ jobs:
       - name: Detect extraction tier
         id: tier
         shell: bash
+        env:
+          REQUESTED_TIER: ${{ github.event.inputs.tier || 'auto' }}
+          TRIGGER_EPOCH: ${{ needs.test.outputs.slot_epoch }}
         run: |
-          tier='${{ github.event.inputs.tier || 'auto' }}'
+          tier="$REQUESTED_TIER"
           if [ "$tier" = "auto" ]; then
-            hour=$(date -u +%H)
-            weekday=$(date -u +%u)
-            tomorrow_day=$(date -u -d '+1 day' +%d)
-            if [ "$hour" = "23" ]; then
-              if [ "$tomorrow_day" = "01" ]; then
+            # Classify by the intended :50 cron slot, not the wall-clock hour.
+            # A 23:50 daily job that starts at 00:05 used to fall through to
+            # "hourly"; walking back to the latest :50 slot keeps the daily,
+            # weekly and monthly escalation even when GitHub starts us late.
+            # The timestamp comes from the test job's first step, so test
+            # runtime does not push a late boundary run past the next slot.
+            # A delay longer than one full cron interval is indistinguishable
+            # from the next slot, so boundary tiers should be dispatched
+            # explicitly by the external scheduler.
+            now_epoch="${TRIGGER_EPOCH:-$(date -u +%s)}"
+            minute=$(date -u -d "@$now_epoch" +%M)
+            minute=$((10#$minute))
+            if [ "$minute" -lt 50 ]; then
+              late_minutes=$((minute + 10))
+            else
+              late_minutes=$((minute - 50))
+            fi
+            slot_epoch=$((now_epoch - late_minutes * 60))
+            slot_hour=$(date -u -d "@$slot_epoch" +%H)
+            slot_hour=$((10#$slot_hour))
+            slot_weekday=$(date -u -d "@$slot_epoch" +%u)
+            slot_weekday=$((10#$slot_weekday))
+            next_day=$(date -u -d "@$((slot_epoch + 86400))" +%d)
+            next_day=$((10#$next_day))
+            if [ "$slot_hour" -eq 23 ]; then
+              if [ "$next_day" -eq 1 ]; then
                 tier="monthly"
-              elif [ "$weekday" = "7" ]; then
+              elif [ "$slot_weekday" -eq 7 ]; then
                 tier="weekly"
               else
                 tier="daily"
@@ -172,6 +229,7 @@ jobs:
             else
               tier="hourly"
             fi
+            echo "Scheduled slot: $(date -u -d "@$slot_epoch" '+%Y-%m-%d %H:%M') UTC (started ${late_minutes}m late)"
           fi
           echo "tier=$tier" >> "$GITHUB_OUTPUT"
           echo "Extraction tier: $tier"

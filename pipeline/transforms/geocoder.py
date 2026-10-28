@@ -12,7 +12,12 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from pipeline.transforms.country_codes import canonical_country
+from pipeline.transforms.country_codes import (
+    AMBIGUOUS_COUNTRY_NAMES,
+    canonical_country,
+    country_mention_supported,
+)
+from pipeline.transforms.disambiguator import Disambiguator
 from pipeline.transforms.world_geodata import DEMONYM_MAP, WORLD_LOCATIONS
 
 logger = logging.getLogger("pipeline.transforms.geocoder")
@@ -49,7 +54,7 @@ KNOWN_WORLD_CAPITALS = {
 
 REGION_KEYS = {
     "california", "texas", "new mexico", "colorado", "arizona",
-    "alberta", "catalonia", "xinjiang", "tibet", "siberia",
+    "washington state", "alberta", "catalonia", "xinjiang", "tibet", "siberia",
     "amazon", "sahel", "donbas", "crimea", "kashmir", "golan heights", "west bank",
     "gaza", "taiwan strait", "spratly islands", "western sahara", "scandinavia",
     "balkans", "caucasus", "middle east", "north africa", "sub-saharan africa",
@@ -106,6 +111,7 @@ class Geocoder:
         self._location_pattern = re.compile(r"(?<![a-z])(" + pattern + r")(?![a-z])", re.IGNORECASE) if pattern else None
         self._request_session = requests.Session()
         self._request_session.headers.update({"User-Agent": "GlobeNewsAtlas/1.0 (geocoding)"})
+        self.disambiguator = Disambiguator()
 
     def geocode(self, location_name: str) -> Optional[Dict[str, Any]]:
         if not location_name:
@@ -236,6 +242,55 @@ class Geocoder:
             logger.warning("Remote geocoding failed for %r: %s", cleaned, type(exc).__name__)
         return None
 
+    def _resolve_name(self, name: str, context: str, headline: bool = False) -> Optional[str]:
+        """Return a supported gazetteer key, or None when a name is ambiguous."""
+        if not name:
+            return None
+        cleaned = _clean_location(name)
+        if not cleaned:
+            return None
+        if self.disambiguator.is_ambiguous(cleaned):
+            resolved = self.disambiguator.disambiguate(cleaned, context)
+            return resolved or None
+        canonical = canonical_country(cleaned)
+        if canonical and canonical.lower() in AMBIGUOUS_COUNTRY_NAMES:
+            if not headline and not country_mention_supported(canonical, context):
+                return None
+        return name
+
+    @staticmethod
+    def _country_location_cue(text: str, country: str) -> int:
+        """Score how strongly a title presents a country as the event location.
+
+        "A Jordanian airstrike ... in Syria" is located in Syria: the demonym
+        identifies an actor, while the preposition marks the dateline.
+        """
+        blob = _ascii(text or "").lower()
+        name = _ascii(country or "").lower()
+        if not blob or not name:
+            return 0
+        score = 0
+        for match in re.finditer(r"(?<![a-z])" + re.escape(name) + r"(?![a-z])", blob):
+            before = blob[max(0, match.start() - 24): match.start()]
+            if re.search(r"(?<![a-z])(?:in|at|near|across|from|around|outside|inside|within|to)\s+(?:the\s+)?$", before):
+                score += 6
+            else:
+                score += 1
+        for demonym, target in DEMONYM_MAP.items():
+            if target.lower() != name:
+                continue
+            if re.search(r"(?<![a-z])" + re.escape(demonym) + r"(?![a-z])", blob):
+                # An actor's nationality is not the same as the dateline.
+                score -= 3
+        return score
+
+    def _ordered_title_countries(self, text: str, countries: List[str]) -> List[str]:
+        return sorted(
+            countries,
+            key=lambda country: self._country_location_cue(text, country),
+            reverse=True,
+        )
+
     def geocode_article(
         self,
         article: Dict[str, Any],
@@ -257,10 +312,16 @@ class Geocoder:
         except (TypeError, ValueError):
             pass
 
+        title = str(article.get("title") or "")
+        context = " ".join(
+            part for part in (title, str(article.get("snippet") or "")) if part
+        )
         country_fallback: Optional[Dict[str, Any]] = None
+
         location_name = article.get("location_name")
         if location_name:
-            info = self.geocode(str(location_name))
+            resolved = self._resolve_name(str(location_name), context, headline=True)
+            info = self.geocode(resolved) if resolved else None
             if info and info["precision"] in {"city", "region"}:
                 return info
             country_fallback = info
@@ -269,34 +330,46 @@ class Geocoder:
         # in the article body is often the outlet's bureau or an incidental
         # mention, which is how a French riot story was once plotted in New York.
         for location in ((title_entities or {}).get("locations") or [])[:8]:
-            info = self.geocode(location)
+            resolved = self._resolve_name(str(location), context, headline=True)
+            info = self.geocode(resolved) if resolved else None
             if info and info["precision"] in {"city", "region"}:
                 return info
             country_fallback = country_fallback or info
 
-        for country in ((title_entities or {}).get("countries") or [])[:6]:
-            info = self.geocode(country)
+        title_countries = self._ordered_title_countries(
+            title,
+            list((title_entities or {}).get("countries") or []),
+        )
+        for country in title_countries[:6]:
+            resolved = self._resolve_name(str(country), context, headline=True)
+            info = self.geocode(resolved) if resolved else None
             if info:
                 info = dict(info)
                 info["precision"] = "country"
-                info["name"] = country
+                info["name"] = str(country)
                 return info
 
+        # Body locations are only used when they are unambiguous cities or
+        # regions. A body-only country is not a dateline.
         locations = (entities or {}).get("locations", []) or []
         for location in locations[:8]:
-            info = self.geocode(location)
+            resolved = self._resolve_name(str(location), context, headline=False)
+            info = self.geocode(resolved) if resolved else None
             if not info:
                 continue
             if info["precision"] in {"city", "region"}:
                 return info
             country_fallback = country_fallback or info
 
+        # Only countries already attached by trusted extraction/metadata are
+        # eligible here; body person names were filtered before this point.
         for country in article.get("countries") or []:
-            info = self.geocode(country)
+            resolved = self._resolve_name(str(country), context, headline=False)
+            info = self.geocode(resolved) if resolved else None
             if info:
                 info = dict(info)
                 info["precision"] = "country"
-                info["name"] = country
+                info["name"] = str(country)
                 return info
 
         return country_fallback

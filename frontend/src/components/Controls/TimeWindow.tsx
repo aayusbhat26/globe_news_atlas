@@ -8,7 +8,13 @@ interface FloatingDockProps {
   spectrumFilter: 'all' | 'left' | 'centre' | 'right';
   onChangeSpectrumFilter: (f: 'all' | 'left' | 'centre' | 'right') => void;
   eventCount: number;
-  totalEventCount?: number;
+  /** Events available to filter in this snapshot (n.e). */
+  matchingTotal?: number;
+  /** True number of events in the window (n.total). */
+  windowTotal?: number;
+  /** True when the API served a capped subset of the window. */
+  windowCapped?: boolean;
+  filtersActive?: boolean;
 }
 
 export const FloatingDock: React.FC<FloatingDockProps> = ({
@@ -17,10 +23,39 @@ export const FloatingDock: React.FC<FloatingDockProps> = ({
   spectrumFilter,
   onChangeSpectrumFilter,
   eventCount,
-  totalEventCount = eventCount,
+  matchingTotal,
+  windowTotal,
+  windowCapped = false,
+  filtersActive = false,
 }) => {
   const { t } = useTranslation();
-  const isCapped = totalEventCount > eventCount;
+  const available = Math.max(eventCount, matchingTotal ?? eventCount);
+  const trueTotal = Math.max(available, windowTotal ?? available);
+  const capped = windowCapped || available < trueTotal;
+
+  const countLabel = filtersActive
+    ? eventCount < available
+      ? t('events_matching_of_total', {
+          shown: eventCount,
+          total: available,
+          count: available,
+        })
+      : t('events_matching_count', { count: eventCount })
+    : capped
+      ? t('events_shown_of_total', {
+          shown: eventCount,
+          total: trueTotal,
+          count: trueTotal,
+        })
+      : t('events_count', { count: eventCount });
+
+  const capNote = capped
+    ? t('events_window_cap_note', {
+        shown: available,
+        total: trueTotal,
+        count: trueTotal,
+      })
+    : null;
 
   return (
     <div className="floating-dock" role="region" aria-label={t('time_and_perspective')}>
@@ -61,15 +96,10 @@ export const FloatingDock: React.FC<FloatingDockProps> = ({
       <span
         className="dock-count"
         aria-live="polite"
-        title={isCapped ? t('events_shown_tooltip', { total: totalEventCount }) : undefined}
+        title={capNote || countLabel}
       >
-        {isCapped
-          ? t('events_shown_of_total', {
-              shown: eventCount,
-              total: totalEventCount,
-              count: totalEventCount,
-            })
-          : t('events_count', { count: eventCount })}
+        <span>{countLabel}</span>
+        {capNote && <small className="dock-count__cap">{capNote}</small>}
       </span>
     </div>
   );

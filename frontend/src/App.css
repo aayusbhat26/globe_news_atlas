@@ -60,6 +60,21 @@
   color: var(--text-secondary);
 }
 
+.data-banner--stale {
+  border-left-color: var(--accent-amber);
+  color: var(--text-primary);
+}
+
+.data-banner--offline {
+  border-left-color: var(--accent-danger);
+  color: var(--text-primary);
+}
+
+.data-banner--notice {
+  border-left-color: var(--accent-blue);
+  color: var(--text-secondary);
+}
+
 .data-banner__btn {
   flex-shrink: 0;
   background: transparent;

@@ -1,4 +1,5 @@
 .git
+.github
 .gitignore
 .venv
 venv
@@ -10,13 +11,24 @@ __pycache__
 .mypy_cache
 frontend/node_modules
 frontend/dist
+# Local runtime lake and caches. A named volume is mounted at /app/data.
 /data
+# Local audit/debug dumps may contain live data and must never ship.
+audit*.json
+audit*.ndjson
+*.sqlite3
+*.db
+# Render import file and local secrets are supplied at runtime, never baked in.
+# Never ignore seeds/: the image copies it to /app/seeds for /v1/outlets.
+render.env
+.env
+.env.*
+.env.example
+secrets
+.secrets
 *.bundle
 *.docx
 *.pdf
 *.log
-.env
-.env.*
 docs
 README.md
-.env.example

@@ -120,8 +120,8 @@ export function checkVerificationToken(token: string): Promise<EmailCheckRespons
   );
 }
 
-export function resendVerification(): Promise<AuthMessage> {
-  return post('/auth/email/resend');
+export function resendVerification(email?: string): Promise<AuthMessage> {
+  return post('/auth/email/resend', email ? { email } : {});
 }
 
 export function forgotPassword(email: string): Promise<AuthMessage> {

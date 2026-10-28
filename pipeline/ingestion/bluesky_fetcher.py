@@ -46,20 +46,23 @@ class BlueskyFetcher(BaseFetcher):
         return response.json().get("posts", [])
 
     def fetch(self) -> List[Dict[str, Any]]:
+        self.begin_fetch()
         if self.is_circuit_open():
             logger.info("Bluesky fetch skipped: circuit breaker open.")
-            return []
+            return self.finish_fetch([], skipped_reason="circuit breaker open")
 
         since = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat().replace("+00:00", "Z")
         records: List[Dict[str, Any]] = []
         seen: set = set()
         failures = 0
+        feed_errors: Dict[str, str] = {}
 
         for query in QUERIES:
             try:
                 posts = self._search(query, since)
             except Exception as exc:
                 failures += 1
+                feed_errors[query] = f"{type(exc).__name__}: {exc}"[:200]
                 logger.warning("Bluesky search %r failed: %s", query, exc)
                 continue
             for post in posts:
@@ -105,9 +108,14 @@ class BlueskyFetcher(BaseFetcher):
                 )
             time.sleep(0.4)
 
-        if failures == len(QUERIES):
-            self.record_failure()
-        else:
-            self.record_success()
         logger.info("Bluesky gathered %d posts", len(records))
-        return records
+        if failures == len(QUERIES):
+            return self.finish_fetch(
+                records,
+                status="failed",
+                error="all Bluesky searches failed",
+                feed_errors=feed_errors,
+            )
+        if failures:
+            return self.finish_fetch(records, status="partial", feed_errors=feed_errors)
+        return self.finish_fetch(records)

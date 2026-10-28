@@ -11,7 +11,7 @@ CATEGORY_KEYWORDS = {
         "clashes": 3, "battle": 2, "armed": 1, "gunmen": 3, "militia": 2,
         "conflict": 3, "strikes": 3, "strike": 2, "attack": 2, "military": 2,
         "naval": 2, "warship": 2, "jets": 2, "missiles": 3, "paramilitary": 3,
-        "hitman": 2, "bombing": 3, "bomb": 2, "houthi": 2,
+        "hitman": 2, "bombing": 3, "bomb": 2, "houthi": 2, "houthis": 2,
     },
     "politics": {
         "election": 3, "parliament": 2, "president": 1, "minister": 1, "treaty": 2,
@@ -19,7 +19,8 @@ CATEGORY_KEYWORDS = {
         "government": 1, "policy": 1, "referendum": 3, "campaign": 1,
         "runoff": 3, "diplomacy": 2, "envoy": 2, "court": 1,
         "supreme court": 3, "voter": 2, "voters": 2, "citizenship": 2,
-        "disqualify": 1, "aligned": 1,
+        "disqualify": 1, "aligned": 1, "debate": 2, "debates": 2,
+        "lawmakers": 1, "legislation": 2, "senate": 1, "congress": 1,
     },
     "economy": {
         "inflation": 3, "trade": 2, "tariff": 3, "central bank": 3, "deficit": 2,
@@ -30,7 +31,7 @@ CATEGORY_KEYWORDS = {
         "bitcoin": 2, "bank": 1, "earnings": 1, "markets": 2, "stock": 2,
         "price": 1, "prices": 1, "gold rate": 3, "gold price": 3,
         "trade deficit": 3, "tariffs": 3, "gasfield": 3, "gas field": 3,
-        "costs": 1,
+        "costs": 1, "refinery": 2, "refineries": 2,
     },
     "disaster": {
         "earthquake": 4, "flood": 3, "hurricane": 3, "wildfire": 3, "cyclone": 3,
@@ -74,9 +75,9 @@ CATEGORY_KEYWORDS = {
         "championship": 3, "baseball": 3, "cricket": 3, "football": 2,
         "soccer": 2, "basketball": 3, "tennis": 3, "golf": 2, "formula one": 4,
         "alcs": 4, "nlcs": 4, "mlb": 3, "nba": 3, "nfl": 3, "nhl": 3,
-        "fifa": 3, "uefa": 3, "ipl": 3, "t20": 4, "odi": 4, "vs": 1,
-        "test match": 3, "match": 1, "game": 1, "medal": 2,
-        "athlete": 2, "coach": 1, "wicket": 3, "innings": 3, "goal": 1,
+        "fifa": 3, "uefa": 3, "ipl": 3, "t20": 4, "odi": 4,
+        "test match": 3, "medal": 2, "athlete": 2, "coach": 1,
+        "wicket": 3, "innings": 3, "goal": 1,
     },
     "other": {},
 }
@@ -122,30 +123,32 @@ class Classifier:
         title_text = title.lower()
         body_text = snippet.lower()
 
-        if pre_assigned_cat in VALID_CATEGORIES:
-            category = pre_assigned_cat
-        else:
-            def keyword_score(text: str) -> Dict[str, int]:
-                result: Dict[str, int] = {}
-                for category_name, keywords in CATEGORY_KEYWORDS.items():
-                    score = sum(
-                        weight
-                        for keyword, weight in keywords.items()
-                        if re.search(rf"(?<![a-z]){re.escape(keyword)}(?![a-z])", text)
-                    )
-                    if score:
-                        result[category_name] = score
-                return result
+        def keyword_score(text: str) -> Dict[str, int]:
+            result: Dict[str, int] = {}
+            for category_name, keywords in CATEGORY_KEYWORDS.items():
+                score = sum(
+                    weight
+                    for keyword, weight in keywords.items()
+                    if re.search(rf"(?<![a-z]){re.escape(keyword)}(?![a-z])", text)
+                )
+                if score:
+                    result[category_name] = score
+            return result
 
-            title_scores = keyword_score(title_text)
-            body_scores = keyword_score(body_text)
-            scores: Dict[str, int] = {
-                category_name: title_scores.get(category_name, 0) * 2
-                + body_scores.get(category_name, 0)
-                for category_name in CATEGORY_KEYWORDS
-            }
-            scores = {name: score for name, score in scores.items() if score}
-            category = max(scores, key=scores.get) if scores else "other"
+        title_scores = keyword_score(title_text)
+        body_scores = keyword_score(body_text)
+        scores: Dict[str, int] = {
+            category_name: title_scores.get(category_name, 0) * 2
+            + body_scores.get(category_name, 0)
+            for category_name in CATEGORY_KEYWORDS
+        }
+        # A source-supplied category is a weak prior, never an override. Live
+        # "shouting match" and refinery stories were misfiled because GDELT/
+        # Google categories were accepted unconditionally.
+        if pre_assigned_cat in VALID_CATEGORIES:
+            scores[pre_assigned_cat] = scores.get(pre_assigned_cat, 0) + 1
+        scores = {name: score for name, score in scores.items() if score}
+        category = max(scores, key=scores.get) if scores else "other"
 
         combined = f"{title_text} {body_text}"
         casualty_text = _NON_CASUALTY_PHRASES.sub(" ", combined)

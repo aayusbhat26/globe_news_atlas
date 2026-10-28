@@ -10,6 +10,7 @@ export const UserMenu: React.FC = () => {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
+  const [signOutError, setSignOutError] = useState<string | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -58,12 +59,20 @@ export const UserMenu: React.FC = () => {
   const user = auth.user;
   const handleSignOut = async () => {
     setSigningOut(true);
+    setSignOutError(null);
     try {
       await auth.signOut();
-    } finally {
-      setSigningOut(false);
       setOpen(false);
       navigate('/');
+    } catch (error) {
+      // Keep the session and the menu open; the item doubles as the retry.
+      setSignOutError(
+        error instanceof Error
+          ? error.message
+          : 'Could not reach the server. Your session is still active.',
+      );
+    } finally {
+      setSigningOut(false);
     }
   };
 
@@ -128,8 +137,13 @@ export const UserMenu: React.FC = () => {
             disabled={signingOut}
           >
             <LogOut size={15} aria-hidden="true" />
-            {signingOut ? t('signing_out') : t('sign_out')}
+            {signingOut ? t('signing_out') : signOutError ? t('sign_out_retry') : t('sign_out')}
           </button>
+          {signOutError && (
+            <p className="user-menu__error" role="alert" aria-live="assertive">
+              {t('sign_out_failed', { error: signOutError })}
+            </p>
+          )}
         </div>
       )}
     </div>

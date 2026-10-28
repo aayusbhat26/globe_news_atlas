@@ -15,6 +15,7 @@ import logging
 import os
 import tempfile
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -29,6 +30,19 @@ SERVING_FILES = tuple(f"world_{window}.json" for window in WINDOWS) + (
     "rewind.json",
     "search_index.sqlite3",
 )
+
+
+def _parse_timestamp(value: Any) -> Optional[datetime]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def empty_snapshot(window: str) -> Dict[str, Any]:
@@ -116,6 +130,22 @@ class ServingStore:
 
     def has_search_index(self) -> bool:
         return (self.root / "search_index.sqlite3").is_file()
+
+    def data_age_seconds(self) -> Optional[int]:
+        """Age of the freshest serving timestamp, or None if unknown."""
+        candidates = [_parse_timestamp(self.get_manifest().get("generated_at"))]
+        candidates.append(_parse_timestamp(self.get_snapshot("24h").get("ts")))
+        stamps = [item for item in candidates if item is not None]
+        if not stamps:
+            return None
+        newest = max(stamps)
+        return max(0, int((datetime.now(timezone.utc) - newest).total_seconds()))
+
+    def is_fresh(self, max_age_seconds: int) -> bool:
+        if not self.has_data():
+            return False
+        age = self.data_age_seconds()
+        return age is not None and age <= max(0, int(max_age_seconds))
 
     # ---------------------------------------------------------- HF cold start
     @property

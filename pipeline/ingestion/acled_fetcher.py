@@ -97,16 +97,16 @@ class ACLEDFetcher(BaseFetcher):
         _TOKEN_CACHE["expires_at"] = 0.0
 
     def fetch(self) -> List[Dict[str, Any]]:
+        self.begin_fetch()
         if not self.email or not self.password:
             logger.info("ACLED credentials not configured; skipping.")
-            return []
+            return self.finish_fetch([], skipped_reason="ACLED credentials are not configured")
         if self.is_circuit_open():
-            return []
+            return self.finish_fetch([], skipped_reason="circuit breaker open")
 
         token = self._token()
         if not token:
-            self.record_failure()
-            return []
+            return self.finish_fetch([], status="failed", error="ACLED OAuth token unavailable")
 
         since = (datetime.now(timezone.utc) - timedelta(days=3)).strftime("%Y-%m-%d")
         payload: Dict[str, Any] = {}
@@ -135,12 +135,15 @@ class ACLEDFetcher(BaseFetcher):
             except Exception as exc:
                 logger.warning("ACLED fetch failed: %s", type(exc).__name__)
                 if attempt == 1:
-                    self.record_failure()
-                    return []
+                    return self.finish_fetch(
+                        [],
+                        status="failed",
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
 
         if not isinstance(payload, dict) or payload.get("status") not in (None, 200):
             logger.warning("ACLED returned an unexpected payload.")
-            return []
+            return self.finish_fetch([], status="failed", error="ACLED returned an unexpected payload")
 
         records: List[Dict[str, Any]] = []
         for event in payload.get("data", []) or []:
@@ -193,7 +196,5 @@ class ACLEDFetcher(BaseFetcher):
                 )
             )
 
-        if records:
-            self.record_success()
         logger.info("ACLED gathered %d events", len(records))
-        return records
+        return self.finish_fetch(records)

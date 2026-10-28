@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class SpectrumBar(BaseModel):
@@ -51,6 +51,15 @@ class TimelineEntry(BaseModel):
     source_count: int
 
 
+class EventSourceItem(BaseModel):
+    """Cited source. Unknown pipeline fields are preserved for clients."""
+
+    model_config = ConfigDict(extra="allow")
+
+    url: str
+    via_google_news: Optional[bool] = None
+
+
 class EventDetailResponse(BaseModel):
     """Full detail payload for the event modal."""
 
@@ -80,6 +89,9 @@ class EventDetailResponse(BaseModel):
     outlet_count: int = 0
     article_count: int = 0
     source_count: int = 0
+    # Honest coverage accounting when the pipeline caps the citations it emits.
+    sources_total: Optional[int] = None
+    sources_shown: Optional[int] = None
     is_single_source: bool = False
     has_coverage_gap: bool = False
     has_official_source: bool = False
@@ -88,7 +100,7 @@ class EventDetailResponse(BaseModel):
 
     countries: List[str] = []
     spectrum: SpectrumBar = SpectrumBar()
-    sources: List[Dict[str, Any]] = []
+    sources: List[EventSourceItem] = []
     related_event_ids: List[str] = []
     related_relation_ids: List[str] = []
     corrections: List[Dict[str, Any]] = []

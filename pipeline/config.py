@@ -117,7 +117,11 @@ class PipelineConfig:
     crawler_max_content_chars: int = field(default_factory=lambda: _int("CRAWLER_MAX_CONTENT_CHARS", 6000))
 
     # Silver / gold
-    cluster_max_articles: int = field(default_factory=lambda: _int("CLUSTER_MAX_ARTICLES", 3000))
+    # Safe upper bound for embedding/clustering. It is deliberately well above
+    # the 30-day editorial volume so the candidate pool is not truncated before
+    # window assignment; MinHash sharding is configured to match.
+    cluster_max_articles: int = field(default_factory=lambda: _int("CLUSTER_MAX_ARTICLES", 12000))
+    dedupe_minhash_max_articles: int = field(default_factory=lambda: _int("DEDUPE_MINHASH_MAX_ARTICLES", 20000))
     cluster_distance_threshold: float = field(default_factory=lambda: _float("CLUSTER_DISTANCE_THRESHOLD", 0.45))
     enable_llm_summaries: bool = field(default_factory=lambda: _bool("ENABLE_LLM_SUMMARIES", True))
     max_llm_summaries: int = field(default_factory=lambda: _int("MAX_LLM_SUMMARIES_PER_RUN", 25))

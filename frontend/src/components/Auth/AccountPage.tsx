@@ -255,6 +255,7 @@ export const AccountPage: React.FC = () => {
   const [dataError, setDataError] = useState<string | null>(null);
   const [sessionBusy, setSessionBusy] = useState<string | null>(null);
   const [sessionStatus, setSessionStatus] = useState<string | null>(null);
+  const [signOutError, setSignOutError] = useState<string | null>(null);
 
   const [showClose, setShowClose] = useState(false);
   const [closePassword, setClosePassword] = useState('');
@@ -566,8 +567,13 @@ export const AccountPage: React.FC = () => {
   };
 
   const signOut = async () => {
-    await auth.signOut();
-    navigate('/', { replace: true });
+    setSignOutError(null);
+    try {
+      await auth.signOut();
+      navigate('/', { replace: true });
+    } catch (error) {
+      setSignOutError(errorMessage(error));
+    }
   };
 
   return (
@@ -596,6 +602,11 @@ export const AccountPage: React.FC = () => {
             Sign out
           </button>
         </header>
+        {signOutError && (
+          <p className="account-status account-status--error" role="alert">
+            Could not sign out. Your session is still active. {signOutError}
+          </p>
+        )}
 
         <div className="account-grid">
           <aside className="account-nav" aria-label="Account sections">

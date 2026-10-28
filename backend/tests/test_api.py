@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import pytest
 from fastapi.testclient import TestClient
 
+from app.auth.store import auth_store
 from app.config import settings
 from app.main import app
 
@@ -15,7 +16,10 @@ def test_health_check():
     response = client.get("/health")
     assert response.status_code == 200
     data = response.json()
-    assert data["status"] == "ok"
+    assert data["status"] in {"ok", "degraded"}
+    assert data["status"] == ("ok" if data["ready"] else "degraded")
+    assert isinstance(data["ready"], bool)
+    assert "data_age_seconds" in data
     assert "version" in data
     assert "data" in data
     head = client.head("/health")
@@ -157,8 +161,15 @@ def test_get_outlets():
     assert any(o["id"] == "reuters" for o in outlets)
 
 
-def test_feedback_report_is_persisted(monkeypatch, tmp_path):
+def _isolated_feedback_db(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "auth_db_backend", "sqlite")
+    monkeypatch.setattr(settings, "auth_db_path", str(tmp_path / "auth.db"))
     monkeypatch.setattr(settings, "data_dir", str(tmp_path))
+    auth_store.reset_runtime_state()
+
+
+def test_feedback_report_is_persisted_in_auth_database(monkeypatch, tmp_path):
+    _isolated_feedback_db(monkeypatch, tmp_path)
     response = client.post(
         "/v1/feedback",
         json={
@@ -171,11 +182,42 @@ def test_feedback_report_is_persisted(monkeypatch, tmp_path):
     body = response.json()
     assert body["status"] == "recorded"
 
+    with auth_store.connection() as conn:
+        row = conn.execute(
+            "SELECT id, event_id, category, details FROM feedback WHERE id = ?",
+            (body["id"],),
+        ).fetchone()
+    assert row is not None
+    assert row["event_id"] == "evt-test"
+    assert row["category"] == "wrong_location"
+    assert "wrong city" in row["details"]
+
+
+def test_feedback_falls_back_to_file_when_database_is_unavailable(
+    monkeypatch, tmp_path
+):
+    _isolated_feedback_db(monkeypatch, tmp_path)
+
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("account database down")
+
+    monkeypatch.setattr(auth_store, "save_feedback", unavailable)
+    response = client.post(
+        "/v1/feedback",
+        json={
+            "event_id": "evt-fallback",
+            "category": "wrong_summary",
+            "details": "The summary is missing context.",
+        },
+    )
+    assert response.status_code == 201
+    body = response.json()
+
     report_file = tmp_path / "feedback" / "reports.jsonl"
     assert report_file.exists()
     record = json.loads(report_file.read_text(encoding="utf-8").splitlines()[0])
-    assert record["event_id"] == "evt-test"
-    assert record["category"] == "wrong_location"
+    assert record["event_id"] == "evt-fallback"
+    assert record["category"] == "wrong_summary"
     assert record["id"] == body["id"]
 
 
@@ -241,3 +283,114 @@ def test_search_uses_full_text_index(monkeypatch, tmp_path):
     assert result.id == "evt-fts-1"
     assert result.summary == "Short summary only."
     assert "distinctive" not in result.summary
+
+
+def test_event_detail_exposes_source_accounting_and_via_google_news(monkeypatch):
+    from app.services.snapshot_service import snapshot_service
+
+    detail = {
+        "id": "evt-sources",
+        "title": "Source accounting",
+        "status": "breaking",
+        "category": "politics",
+        "severity": "low",
+        "summary": "A payload with capped sources.",
+        "sources_total": 12,
+        "sources_shown": 1,
+        "sources": [
+            {
+                "url": "https://example.com/story",
+                "outlet_name": "Example News",
+                "alignment": "centre",
+                "via_google_news": True,
+                "pipeline_extra": "preserved",
+            }
+        ],
+        "spectrum": {"left": 0, "centre": 1, "right": 0, "unrated": 0},
+        "coverage": [],
+    }
+    monkeypatch.setattr(snapshot_service, "get_detail", lambda event_id: detail)
+
+    response = client.get("/v1/events/evt-sources")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["sources_total"] == 12
+    assert body["sources_shown"] == 1
+    assert body["sources"][0]["via_google_news"] is True
+    assert body["sources"][0]["pipeline_extra"] == "preserved"
+
+
+def test_event_detail_without_optional_source_fields_still_validates(monkeypatch):
+    from app.services.snapshot_service import snapshot_service
+
+    detail = {
+        "id": "evt-plain",
+        "title": "Plain payload",
+        "status": "developing",
+        "category": "politics",
+        "summary": "No new fields.",
+        "sources": [{"url": "https://example.com/a", "outlet_name": "Example"}],
+        "spectrum": {"left": 1, "centre": 0, "right": 0, "unrated": 0},
+        "coverage": [],
+    }
+    monkeypatch.setattr(snapshot_service, "get_detail", lambda event_id: detail)
+
+    body = client.get("/v1/events/evt-plain").json()
+    assert body["sources_total"] is None
+    assert body["sources_shown"] is None
+    assert body["sources"][0]["via_google_news"] is None
+
+
+def test_fallback_framing_notes_are_grammatical():
+    from app.services.event_service import event_service
+
+    detail = event_service._fallback_detail(
+        {
+            "id": "evt-framing",
+            "t": "Framing note",
+            "sp": {"left": 1, "centre": 2, "right": 0, "unrated": 3},
+            "oc": 6,
+        },
+        "24h",
+    )
+    notes = [column.framing_note for column in detail.coverage]
+    assert "1 left-rated outlet reported this event." in notes
+    assert "2 centre-rated outlets reported this event." in notes
+    assert "3 unrated outlets reported this event." in notes
+    assert all("outlet(s)" not in note and "unrated-rated" not in note for note in notes)
+
+
+def test_pipeline_framing_notes_are_normalized(monkeypatch):
+    from app.services.snapshot_service import snapshot_service
+
+    detail = {
+        "id": "evt-framing-pipeline",
+        "title": "Framing normalization",
+        "status": "developing",
+        "category": "politics",
+        "summary": "Old pipeline notes.",
+        "coverage": [
+            {
+                "camp": "unrated",
+                "outlet_count": 1,
+                "article_count": 1,
+                "framing_note": "1 unrated-rated outlet(s) reported this event.",
+            },
+            {
+                "camp": "centre",
+                "outlet_count": 3,
+                "article_count": 4,
+                "framing_note": "3 centre-rated outlet(s) reported this event.",
+            },
+        ],
+        "spectrum": {"left": 0, "centre": 3, "right": 0, "unrated": 1},
+        "sources": [],
+    }
+    monkeypatch.setattr(snapshot_service, "get_detail", lambda event_id: detail)
+
+    body = client.get("/v1/events/evt-framing-pipeline").json()
+    notes = [column["framing_note"] for column in body["coverage"]]
+    assert notes == [
+        "1 unrated outlet reported this event.",
+        "3 centre-rated outlets reported this event.",
+    ]

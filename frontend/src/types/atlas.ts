@@ -75,6 +75,8 @@ export interface ThinFile {
   shown: number;
   counts: Record<string, number>;
   items: ThinItem[];
+  /** Present when the API can distinguish an unavailable desk from an empty one. */
+  available?: boolean;
 }
 
 export interface StorylinePreview {

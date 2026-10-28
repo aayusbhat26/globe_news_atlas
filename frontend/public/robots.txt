@@ -1,0 +1,12 @@
+User-agent: *
+Allow: /
+Disallow: /account
+Disallow: /login
+Disallow: /signup
+Disallow: /forgot-password
+Disallow: /reset-password
+Disallow: /verify-email
+Disallow: /watchline
+Disallow: /embed/
+Disallow: /v1/
+Sitemap: https://globe-news-atlas.onrender.com/sitemap.xml

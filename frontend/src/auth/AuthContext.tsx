@@ -134,11 +134,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const signOut = useCallback(async () => {
     try {
       await logoutRequest();
-    } finally {
-      setUser(null);
-      setExpiresAt(null);
-      notifyAuthChange();
+    } catch (error) {
+      // A 401 means the server session is already gone, so the local state can
+      // be cleared safely. Any other failure keeps the reader signed in and
+      // lets the caller offer a retry.
+      if (!(error instanceof ApiError && error.status === 401)) {
+        throw error;
+      }
     }
+    setUser(null);
+    setExpiresAt(null);
+    notifyAuthChange();
   }, []);
 
   const updateUser = useCallback((nextUser: AuthUser) => {

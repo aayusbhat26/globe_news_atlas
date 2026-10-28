@@ -51,13 +51,14 @@ class NewsAPIFetcher(BaseFetcher):
         return True
 
     def fetch(self) -> List[Dict[str, Any]]:
+        self.begin_fetch()
         if not self.api_key:
             logger.info("NewsAPI key not configured; skipping.")
-            return []
+            return self.finish_fetch([], skipped_reason="NEWSAPI_KEY is not configured")
         if self.is_circuit_open():
-            return []
+            return self.finish_fetch([], skipped_reason="circuit breaker open")
         if not self._allow_request():
-            return []
+            return self.finish_fetch([], skipped_reason="daily request budget exhausted")
 
         try:
             response = self.session.get(
@@ -74,8 +75,7 @@ class NewsAPIFetcher(BaseFetcher):
             payload = response.json()
         except Exception as exc:
             logger.warning("NewsAPI fetch failed: %s", exc)
-            self.record_failure()
-            return []
+            return self.finish_fetch([], status="failed", error=f"{type(exc).__name__}: {exc}")
 
         records: List[Dict[str, Any]] = []
         seen: set = set()
@@ -116,7 +116,5 @@ class NewsAPIFetcher(BaseFetcher):
                 )
             )
 
-        if records:
-            self.record_success()
         logger.info("NewsAPI gathered %d articles", len(records))
-        return records
+        return self.finish_fetch(records)

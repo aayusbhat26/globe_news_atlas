@@ -1,3 +1,6 @@
+# Backup only. UptimeRobot (every 5 minutes) is the primary keepalive; GitHub
+# scheduled workflows are best-effort and can be delayed or disabled after a
+# period of repository inactivity. Do not rely on this file alone.
 name: Keep alive
 
 on:

@@ -1,6 +1,7 @@
 import re
 import unicodedata
-from typing import Any, Dict, List, Set
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Set
 
 import numpy as np
 from sklearn.cluster import AgglomerativeClustering
@@ -94,6 +95,69 @@ def _ascii(value: str) -> str:
     )
 
 
+# Tokens that describe presentation or legal process rather than a specific
+# event. Removing them prevents "million views" and "death penalty" headlines
+# from linking unrelated stories.
+GENERIC_TOKENS = {
+    "million", "millions", "billion", "billions", "thousand", "thousands",
+    "view", "views", "viral", "video", "videos", "watch", "clip", "clips",
+    "photo", "photos", "image", "images", "live", "latest", "breaking",
+    "update", "updates", "report", "reports", "story", "stories", "news",
+    "today", "yesterday", "week", "month", "year", "years", "time", "times",
+    "people", "person", "man", "woman", "women", "men", "child", "children",
+    "police", "court", "judge", "trial", "case", "law", "legal", "rights",
+    "death", "deaths", "dead", "kill", "killed", "killing", "penalty",
+    "sentence", "sentenced", "sentencing", "prison", "jail", "jailed",
+    "drug", "drugs", "trafficking", "smuggling", "arrest", "arrested",
+    "charge", "charged", "convict", "convicted", "guilty", "crime", "criminal",
+    "shooting", "shot", "attack", "attacks", "blast", "crash", "fire",
+    "killed", "injured", "wounded", "victim", "victims", "family", "families",
+    "government", "official", "officials", "minister", "president", "leader",
+    "country", "city", "state", "region", "area", "place", "home", "house",
+    "school", "hospital", "company", "group", "party", "result", "results",
+    "first", "last", "new", "next", "top", "best", "big", "high", "low",
+    "says", "said", "claim", "claims", "claimed", "calls", "called",
+    "amid", "over", "after", "before", "during", "against", "between",
+}
+
+# Shared tokens that still need corroboration from a shared country or event
+# family. They are common in unrelated legal and casualty stories.
+WEAK_EVENT_TOKENS = {
+    "death", "dead", "killed", "killing", "penalty", "sentence", "sentenced",
+    "sentencing", "prison", "jail", "jailed", "drug", "drugs", "trafficking",
+    "smuggling", "arrest", "arrested", "charge", "charged", "convict",
+    "convicted", "guilty", "crime", "criminal", "court", "judge", "trial",
+    "police", "attack", "attacks", "blast", "shooting", "shot", "fire",
+    "million", "millions", "billion", "billions", "view", "views", "viral",
+    "video", "videos", "watch", "claim", "claims", "claimed",
+}
+
+OFFICIAL_EVENT_SOURCES = {"usgs", "acled", "reliefweb", "gdelt_events"}
+MAX_PAIR_HOURS = 7 * 24
+
+
+def official_event_id(article: Dict[str, Any]) -> str:
+    """Official feeds publish an authoritative event id; distinct ids never merge."""
+    source = str(article.get("source") or "").strip().lower()
+    if source not in OFFICIAL_EVENT_SOURCES:
+        return ""
+    source_id = str(article.get("source_id") or article.get("id") or "").strip()
+    return f"{source}:{source_id}" if source_id else ""
+
+
+def _article_time(article: Dict[str, Any]) -> Optional[datetime]:
+    raw = article.get("published_at") or article.get("first_seen") or article.get("at")
+    if not raw:
+        return None
+    try:
+        moment = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc)
+
+
 def _stem(token: str) -> str:
     if len(token) > 5 and token.endswith("ies"):
         return token[:-3] + "y"
@@ -110,11 +174,15 @@ def _stem(token: str) -> str:
 
 def title_tokens(title: str) -> Set[str]:
     cleaned = _ascii(title).lower()
-    return {
-        _stem(token)
-        for token in re.findall(r"[a-z0-9]{4,}", cleaned)
-        if token not in STOPWORDS and not token.isdigit()
-    }
+    tokens: Set[str] = set()
+    for token in re.findall(r"[a-z0-9]{4,}", cleaned):
+        if token.isdigit() or token in STOPWORDS:
+            continue
+        stemmed = _stem(token)
+        if stemmed in GENERIC_TOKENS or token in GENERIC_TOKENS:
+            continue
+        tokens.add(stemmed)
+    return tokens
 
 
 def _tokens_match(left: str, right: str) -> bool:
@@ -153,13 +221,36 @@ def shares_story(
     right_countries: Set[str] | None = None,
     left_events: Set[str] | None = None,
     right_events: Set[str] | None = None,
+    left_official_id: str = "",
+    right_official_id: str = "",
+    left_time: Optional[datetime] = None,
+    right_time: Optional[datetime] = None,
 ) -> bool:
+    """Return True only when two headlines describe the same story.
+
+    Guards, in order: distinct official event ids never merge; reports more
+    than a week apart are not the same event; two shared tokens are required,
+    and a pair of weak/legal tokens alone is not enough without a shared
+    country or event family.
+    """
+    if left_official_id and right_official_id and left_official_id != right_official_id:
+        return False
+    if left_time and right_time:
+        if abs((left_time - right_time).total_seconds()) > MAX_PAIR_HOURS * 3600:
+            return False
+
     shared = {
         a for a in left for b in right
         if _tokens_match(a, b)
     }
     if len(shared) >= 2:
-        return True
+        distinctive = {token for token in shared if token not in WEAK_EVENT_TOKENS}
+        countries_overlap = bool(left_countries and right_countries and (left_countries & right_countries))
+        events_overlap = bool(left_events and right_events and (left_events & right_events))
+        if len(distinctive) >= 2:
+            return True
+        if distinctive and (countries_overlap or events_overlap):
+            return True
     if (
         left_countries
         and right_countries
@@ -222,11 +313,15 @@ class StoryClusterer:
         for group in groups:
             countries: Set[str] = set()
             events: Set[str] = set()
+            official_ids: Set[str] = set()
             for article in group:
                 title = str(article.get("title") or "")
                 countries.update(countries_in_text(title, limit=6))
                 events.update(_event_roots(title_tokens(title)))
-            signatures.append((countries, events))
+                official = official_event_id(article)
+                if official:
+                    official_ids.add(official)
+            signatures.append((countries, events, official_ids))
 
         parent = list(range(len(groups)))
 
@@ -238,8 +333,14 @@ class StoryClusterer:
 
         for left in range(len(groups)):
             for right in range(left + 1, len(groups)):
-                left_countries, left_events = signatures[left]
-                right_countries, right_events = signatures[right]
+                left_countries, left_events, left_official = signatures[left]
+                right_countries, right_events, right_official = signatures[right]
+                # A group carrying an official event id may only merge with a
+                # group carrying the same id. Distinct USGS/ACLED records are
+                # authoritative and must never collapse into one story.
+                if left_official or right_official:
+                    if left_official != right_official or not left_official:
+                        continue
                 if (
                     left_events
                     and right_events
@@ -263,6 +364,8 @@ class StoryClusterer:
             for article in group
         ]
         event_sets = [_event_roots(token_set) for token_set in tokens]
+        official_ids = [official_event_id(article) for article in group]
+        timestamps = [_article_time(article) for article in group]
         adjacency: Dict[int, Set[int]] = {index: set() for index in range(len(group))}
         for left in range(len(group)):
             for right in range(left + 1, len(group)):
@@ -273,6 +376,10 @@ class StoryClusterer:
                     country_sets[right],
                     event_sets[left],
                     event_sets[right],
+                    left_official_id=official_ids[left],
+                    right_official_id=official_ids[right],
+                    left_time=timestamps[left],
+                    right_time=timestamps[right],
                 ):
                     adjacency[left].add(right)
                     adjacency[right].add(left)

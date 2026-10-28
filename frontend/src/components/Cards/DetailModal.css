@@ -22,6 +22,8 @@
 .dossier {
   width: min(1160px, 94vw);
   height: 90vh;
+  height: 90dvh;
+  max-height: 94dvh;
   background: var(--bg-surface-elevated);
   border: 1px solid var(--border-medium);
   border-top: 4px solid var(--accent-primary);
@@ -42,11 +44,21 @@
   height: auto;
   min-height: 220px;
   max-width: 520px;
-  justify-content: center;
-  align-items: center;
-  padding: 36px;
-  gap: 12px;
+  justify-content: flex-start;
+  align-items: stretch;
+  padding: 0;
+  gap: 0;
   text-align: center;
+}
+
+.dossier__message-body {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 36px;
 }
 
 .dossier__message {
@@ -69,12 +81,12 @@
 
 /* ------------------------------------------------ utility rail */
 .dossier__rail {
-  height: 32px;
-  flex: 0 0 32px;
+  height: 44px;
+  flex: 0 0 44px;
   display: flex;
   align-items: center;
   gap: 7px;
-  padding: 0 16px;
+  padding: 0 10px 0 16px;
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-surface);
 }
@@ -101,6 +113,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
   padding: 3px;
 }
 
@@ -184,6 +198,14 @@
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--accent-primary);
+}
+
+.dossier__flag--gap {
+  color: var(--accent-amber);
+}
+
+.dossier__caveat--gap {
+  border-left-color: var(--accent-amber);
 }
 
 .dossier__title {
@@ -808,6 +830,8 @@
   .dossier {
     width: 100vw;
     height: 100vh;
+    height: 100dvh;
+    max-height: 100dvh;
     border-left: 0;
     border-right: 0;
     border-bottom: 0;

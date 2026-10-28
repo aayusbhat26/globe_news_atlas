@@ -114,23 +114,25 @@ class RSSFetcher(BaseFetcher):
         return records
 
     def fetch(self) -> List[Dict[str, Any]]:
+        self.begin_fetch()
         if self.is_circuit_open():
             logger.info("RSS fetch skipped: circuit breaker open.")
-            return []
+            return self.finish_fetch([], skipped_reason="circuit breaker open")
         if not feedparser:
             logger.warning("feedparser is not installed; skipping RSS crawl.")
-            return []
+            return self.finish_fetch([], skipped_reason="feedparser is not installed")
 
         outlets = self._load_outlets()
         if settings.rss_max_outlets > 0:
             outlets = outlets[: settings.rss_max_outlets]
         if not outlets:
-            return []
+            return self.finish_fetch([], skipped_reason="no RSS outlets configured")
 
         records: List[Dict[str, Any]] = []
         seen_urls: set = set()
         succeeded = 0
         failed = 0
+        feed_errors: Dict[str, str] = {}
 
         with ThreadPoolExecutor(max_workers=max(1, self.max_workers)) as pool:
             futures = {pool.submit(self._fetch_outlet, outlet): outlet for outlet in outlets}
@@ -141,6 +143,7 @@ class RSSFetcher(BaseFetcher):
                     succeeded += 1
                 except Exception as exc:
                     failed += 1
+                    feed_errors[str(outlet.get("id") or "unknown")] = f"{type(exc).__name__}: {exc}"[:200]
                     logger.warning("RSS feed for %s failed: %s", outlet.get("id"), exc)
                     continue
                 for item in items:
@@ -151,9 +154,14 @@ class RSSFetcher(BaseFetcher):
                     records.append(item)
 
         records.sort(key=lambda r: r["published_at"] or "", reverse=True)
-        if succeeded:
-            self.record_success()
-        else:
-            self.record_failure()
         logger.info("RSS: %d articles from %d/%d feeds (%d failed)", len(records), succeeded, len(outlets), failed)
-        return records
+        if failed and succeeded:
+            return self.finish_fetch(records, status="partial", feed_errors=feed_errors)
+        if failed and not succeeded:
+            return self.finish_fetch(
+                records,
+                status="failed",
+                error=f"all {failed} RSS feeds failed",
+                feed_errors=feed_errors,
+            )
+        return self.finish_fetch(records)

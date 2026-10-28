@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { ArrowUpRight, FileSearch } from 'lucide-react';
 import { PageShell } from './PageShell';
 import { fetchThinFile } from '../../services/atlas';
+import { isAbortError } from '../../services/api';
 import { getCategoryColor } from '../../utils/colors';
 import { formatRelativeTime } from '../../utils/time';
 import { navigate } from '../../router';
@@ -21,18 +22,42 @@ export const ThinFilePage: React.FC = () => {
   const [timeWindow, setTimeWindow] = useState<TimeWindow>('24h');
   const [data, setData] = useState<ThinFile | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [reloadToken, setReloadToken] = useState(0);
 
   useEffect(() => {
-    setLoading(true);
+    const controller = new AbortController();
+    let active = true;
+    setLoading(!data);
+    setRefreshing(Boolean(data));
     setError(null);
-    fetchThinFile(timeWindow)
-      .then(setData)
+    fetchThinFile(timeWindow, controller.signal)
+      .then((result) => {
+        if (active) setData(result);
+      })
       .catch((err: unknown) => {
+        if (!active || isAbortError(err)) return;
         setError(err instanceof Error ? err.message : 'Could not read the Thin File.');
       })
-      .finally(() => setLoading(false));
-  }, [timeWindow]);
+      .finally(() => {
+        if (!active) return;
+        setLoading(false);
+        setRefreshing(false);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+    // `data` only decides between an initial load and a refresh.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [timeWindow, reloadToken]);
+
+  const unavailable = Boolean(
+    data &&
+      (data.available === false ||
+        (!data.generated_at && data.total_events === 0 && data.items.length === 0)),
+  );
 
   return (
     <PageShell
@@ -47,19 +72,26 @@ export const ThinFilePage: React.FC = () => {
         </>
       }
       actions={
-        <div className="page-windows" role="group" aria-label="Time window">
-          {WINDOWS.map((value) => (
-            <button
-              key={value}
-              type="button"
-              className={timeWindow === value ? 'is-active' : ''}
-              aria-pressed={timeWindow === value}
-              onClick={() => setTimeWindow(value)}
-            >
-              {value}
-            </button>
-          ))}
-        </div>
+        <>
+          <div className="page-windows" role="group" aria-label="Time window">
+            {WINDOWS.map((value) => (
+              <button
+                key={value}
+                type="button"
+                className={timeWindow === value ? 'is-active' : ''}
+                aria-pressed={timeWindow === value}
+                onClick={() => setTimeWindow(value)}
+              >
+                {value}
+              </button>
+            ))}
+          </div>
+          {refreshing && (
+            <span className="page-refreshing" role="status">
+              Refreshing…
+            </span>
+          )}
+        </>
       }
     >
       {data && (
@@ -99,6 +131,26 @@ export const ThinFilePage: React.FC = () => {
         <div className="page-error" role="alert">
           <h2>The file could not be read.</h2>
           <p>{error}</p>
+          <button
+            type="button"
+            className="page-secondary"
+            onClick={() => setReloadToken((token) => token + 1)}
+          >
+            Try again
+          </button>
+        </div>
+      ) : unavailable ? (
+        <div className="page-empty" role="status">
+          <FileSearch size={22} aria-hidden="true" />
+          <h2>The Thin File is temporarily unavailable.</h2>
+          <p>The snapshot exists, but its thin-dispatch extract is not ready yet.</p>
+          <button
+            type="button"
+            className="page-secondary"
+            onClick={() => setReloadToken((token) => token + 1)}
+          >
+            Try again
+          </button>
         </div>
       ) : data && data.items.length === 0 ? (
         <div className="page-empty">

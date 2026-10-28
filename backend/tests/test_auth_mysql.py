@@ -20,6 +20,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 TABLES = (
+    "feedback",
     "reader_prefs",
     "watchlines",
     "auth_events",

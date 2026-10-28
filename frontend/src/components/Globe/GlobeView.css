@@ -1,8 +1,9 @@
 .globe-container {
+  --globe-inset-top: 0px;
   width: 100vw;
-  height: 100vh;
+  height: calc(100vh - var(--globe-inset-top));
   position: absolute;
-  top: 0;
+  top: var(--globe-inset-top);
   left: 0;
   overflow: hidden;
   background: var(--bg-primary);
@@ -39,6 +40,7 @@
 .globe-marker {
   --marker-ring: var(--bg-primary);
   --marker-halo: rgba(0, 0, 0, 0.34);
+  position: relative;
   width: var(--marker-size, 11px);
   height: var(--marker-size, 11px);
   padding: 0;
@@ -50,6 +52,7 @@
   cursor: pointer;
   pointer-events: auto;
   overflow: visible;
+  z-index: 5;
   -webkit-tap-highlight-color: transparent;
   transition: opacity var(--transition-fast);
 }
@@ -345,6 +348,7 @@
 }
 
 .geo-label--country {
+  position: relative;
   font-family: var(--font-mono);
   font-size: 10px;
   font-weight: 600;
@@ -365,6 +369,37 @@
     background var(--transition-fast),
     box-shadow var(--transition-fast),
     opacity var(--transition-fast);
+}
+
+.geo-label--country.geo-label--static {
+  pointer-events: none;
+  cursor: default;
+}
+
+/* Enlarge the touch target without enlarging the label or dot. */
+@media (pointer: coarse) {
+  .globe-marker::before,
+  .geo-label--country::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: max(100%, 44px);
+    height: 44px;
+    transform: translate(-50%, -50%);
+  }
+
+  .globe-marker::before {
+    pointer-events: auto;
+  }
+
+  .geo-label--country::after {
+    pointer-events: auto;
+  }
+
+  .geo-label--country.geo-label--static::after {
+    display: none;
+  }
 }
 
 .geo-label--country:hover,

@@ -41,6 +41,18 @@ export function replaceQuerySilently(to: string): void {
   window.history.replaceState(null, '', to);
 }
 
+/**
+ * decodeURIComponent throws on malformed escapes such as `/event/%E0%A4%A`.
+ * A bad URL should render an unavailable dossier, not unmount the whole app.
+ */
+export function decodePathSegment(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
 export function safeNextPath(value: string | null, fallback = '/'): string {
   if (!value) return fallback;
   if (!value.startsWith('/') || value.startsWith('//') || value.includes('\\')) {

@@ -46,6 +46,8 @@ export const EventPage: React.FC<EventPageProps> = ({ eventId }) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+  const [copyNotice, setCopyNotice] = useState<string | null>(null);
+  const [copyFallback, setCopyFallback] = useState<{ label: string; value: string } | null>(null);
   const [entries, setEntries] = useState<WatchlineEntry[]>([]);
   const [followBusy, setFollowBusy] = useState<string | null>(null);
   const [followMessage, setFollowMessage] = useState<string | null>(null);
@@ -105,20 +107,75 @@ export const EventPage: React.FC<EventPageProps> = ({ eventId }) => {
 
   useEffect(() => {
     if (!data) return;
-    const meta = document.querySelector('meta[name="description"]');
-    const previous = meta?.getAttribute('content') || '';
-    meta?.setAttribute('content', data.summary.slice(0, 180) || data.title);
-    let canonical = document.querySelector('link[rel="canonical"]') as HTMLLinkElement | null;
-    const created = !canonical;
+    const origin = window.location.origin;
+    const description = (data.summary || data.excerpt || data.title).slice(0, 180);
+    const pageTitle = `${data.title} — Globe News Atlas`;
+    const canonicalUrl = citation?.url || `${origin}/event/${encodeURIComponent(eventId)}`;
+    const imageUrl = `${origin}/og-image.png`;
+    const restores: Array<() => void> = [];
+
+    let descriptionMeta = document.querySelector<HTMLMetaElement>('meta[name="description"]');
+    const previousDescription = descriptionMeta?.getAttribute('content') || '';
+    if (!descriptionMeta) {
+      descriptionMeta = document.createElement('meta');
+      descriptionMeta.name = 'description';
+      document.head.appendChild(descriptionMeta);
+    }
+    descriptionMeta.setAttribute('content', description);
+
+    let canonical = document.querySelector<HTMLLinkElement>('link[rel="canonical"]');
+    const previousCanonical = canonical?.getAttribute('href') || '';
+    const canonicalCreated = !canonical;
     if (!canonical) {
       canonical = document.createElement('link');
       canonical.rel = 'canonical';
       document.head.appendChild(canonical);
     }
-    canonical.href = citation?.url || `${window.location.origin}/event/${eventId}`;
+    canonical.href = canonicalUrl;
+
+    const meta = [
+      ['property', 'og:type', 'article'],
+      ['property', 'og:site_name', 'Globe News Atlas'],
+      ['property', 'og:title', pageTitle],
+      ['property', 'og:description', description],
+      ['property', 'og:url', canonicalUrl],
+      ['property', 'og:image', imageUrl],
+      ['property', 'og:image:alt', data.title],
+      ['name', 'twitter:card', 'summary_large_image'],
+      ['name', 'twitter:title', pageTitle],
+      ['name', 'twitter:description', description],
+      ['name', 'twitter:image', imageUrl],
+    ] as const;
+
+    for (const [attribute, key, content] of meta) {
+      let element = document.head.querySelector<HTMLMetaElement>(`meta[${attribute}="${key}"]`);
+      const created = !element;
+      const previous = element?.getAttribute('content') ?? null;
+      if (!element) {
+        element = document.createElement('meta');
+        element.setAttribute(attribute, key);
+        document.head.appendChild(element);
+      }
+      element.setAttribute('content', content);
+      restores.push(() => {
+        if (created) {
+          element?.remove();
+        } else if (previous != null) {
+          element?.setAttribute('content', previous);
+        } else {
+          element?.removeAttribute('content');
+        }
+      });
+    }
+
     return () => {
-      meta?.setAttribute('content', previous);
-      if (created) canonical?.remove();
+      descriptionMeta?.setAttribute('content', previousDescription);
+      if (canonicalCreated) {
+        canonical?.remove();
+      } else if (canonical) {
+        canonical.href = previousCanonical;
+      }
+      restores.forEach((restore) => restore());
     };
   }, [citation, data, eventId]);
 
@@ -128,11 +185,23 @@ export const EventPage: React.FC<EventPageProps> = ({ eventId }) => {
     [eventId],
   );
 
-  const copy = async (key: string, value: string) => {
+  const copy = async (key: string, value: string, label: string) => {
     const ok = await copyToClipboard(value);
-    if (!ok) return;
-    setCopied(key);
-    window.setTimeout(() => setCopied(null), 2000);
+    if (ok) {
+      setCopied(key);
+      setCopyFallback(null);
+      setCopyNotice(`${label} copied.`);
+      window.setTimeout(() => {
+        setCopied(null);
+        setCopyNotice(null);
+      }, 2400);
+    } else {
+      setCopied(null);
+      setCopyNotice(
+        `Could not copy the ${label.toLowerCase()}. Select the text below and copy it manually.`,
+      );
+      setCopyFallback({ label, value });
+    }
   };
 
   const downloadBibtex = () => {
@@ -173,6 +242,12 @@ export const EventPage: React.FC<EventPageProps> = ({ eventId }) => {
   const coverageColumns = data.coverage.filter(
     (column) => column.outlet_count > 0 || column.sample_headlines?.length,
   );
+  const sourcesShown = data.sources_shown ?? data.sources.length;
+  const sourcesTotal = Math.max(
+    data.sources_total ?? data.source_count ?? data.sources.length,
+    sourcesShown,
+  );
+  const sourcesSampled = sourcesTotal > sourcesShown;
   const deck =
     data.summary && data.summary.trim().toLowerCase() !== data.title.trim().toLowerCase()
       ? data.summary
@@ -198,7 +273,7 @@ export const EventPage: React.FC<EventPageProps> = ({ eventId }) => {
           <button
             type="button"
             className="page-secondary"
-            onClick={() => copy('link', citation?.url || `${window.location.origin}/event/${eventId}`)}
+            onClick={() => copy('link', citation?.url || `${window.location.origin}/event/${eventId}`, 'Link')}
           >
             {copied === 'link' ? <Check size={13} /> : <Link2 size={13} />}
             {copied === 'link' ? 'Copied' : 'Copy link'}
@@ -215,6 +290,34 @@ export const EventPage: React.FC<EventPageProps> = ({ eventId }) => {
       }
     >
       <div className="event-page">
+        <p className="sr-only" role="status" aria-live="polite">
+          {copyNotice || ''}
+        </p>
+        {copyFallback && (
+          <div className="event-copy-fallback" role="alert">
+            <label htmlFor="event-copy-fallback">
+              {copyNotice || `${copyFallback.label} is ready to copy.`}
+            </label>
+            <textarea
+              id="event-copy-fallback"
+              readOnly
+              rows={copyFallback.label === 'Embed code' ? 4 : 3}
+              value={copyFallback.value}
+              onFocus={(event) => event.currentTarget.select()}
+              onClick={(event) => event.currentTarget.select()}
+            />
+            <button
+              type="button"
+              className="page-quiet"
+              onClick={() => {
+                setCopyFallback(null);
+                setCopyNotice(null);
+              }}
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
         {data.content_warning && (
           <div className="event-warning" role="note">
             <strong>Content note</strong>
@@ -316,7 +419,13 @@ export const EventPage: React.FC<EventPageProps> = ({ eventId }) => {
                                 rel="noopener noreferrer"
                               >
                                 {headline.title}
-                                <span>{headline.outlet} <ExternalLink size={10} /></span>
+                                <span>
+                                  {headline.outlet}
+                                  {headline.via_google_news && (
+                                    <span className="via-google">via Google News</span>
+                                  )}{' '}
+                                  <ExternalLink size={10} />
+                                </span>
                               </a>
                             </li>
                           ))}
@@ -351,8 +460,18 @@ export const EventPage: React.FC<EventPageProps> = ({ eventId }) => {
             <section className="event-section">
               <div className="event-section__head">
                 <h2>Sources</h2>
-                <span>{data.sources.length} links</span>
+                <span>
+                  {sourcesSampled
+                    ? `Showing ${sourcesShown} of ${sourcesTotal} sources`
+                    : `${sourcesShown} ${sourcesShown === 1 ? 'link' : 'links'}`}
+                </span>
               </div>
+              {sourcesSampled && (
+                <p className="event-muted">
+                  The dossier lists a ranked sample of the sources attached to this
+                  event; the full source count is {sourcesTotal}.
+                </p>
+              )}
               {data.sources.length > 0 ? (
                 <ol className="event-sources">
                   {data.sources.map((source, index) => (
@@ -362,6 +481,9 @@ export const EventPage: React.FC<EventPageProps> = ({ eventId }) => {
                         <span className="event-sources__outlet">
                           {source.outlet_name}
                           <span>{source.alignment}</span>
+                          {source.via_google_news && (
+                            <span className="via-google">via Google News</span>
+                          )}
                           {source.published_at && <span>{formatRelativeTime(source.published_at)}</span>}
                         </span>
                         <a
@@ -468,7 +590,7 @@ export const EventPage: React.FC<EventPageProps> = ({ eventId }) => {
                 </div>
                 <div className="event-cite__row">
                   <span>APA</span>
-                  <button type="button" onClick={() => copy('apa', citation.apa)}>
+                  <button type="button" onClick={() => copy('apa', citation.apa, 'APA citation')}>
                     {copied === 'apa' ? <Check size={12} /> : <Copy size={12} />}
                     {copied === 'apa' ? 'Copied' : 'Copy'}
                   </button>
@@ -476,7 +598,7 @@ export const EventPage: React.FC<EventPageProps> = ({ eventId }) => {
                 <p className="event-cite__text">{citation.apa}</p>
                 <div className="event-cite__row">
                   <span>BibTeX</span>
-                  <button type="button" onClick={() => copy('bibtex', citation.bibtex)}>
+                  <button type="button" onClick={() => copy('bibtex', citation.bibtex, 'BibTeX citation')}>
                     {copied === 'bibtex' ? <Check size={12} /> : <Copy size={12} />}
                     {copied === 'bibtex' ? 'Copied' : 'Copy'}
                   </button>
@@ -493,7 +615,7 @@ export const EventPage: React.FC<EventPageProps> = ({ eventId }) => {
               <p>Paste this iframe into a classroom page or blog. It stays linked to the live record.</p>
               <textarea readOnly value={embedCode} aria-label="Embed code" rows={4} />
               <div className="event-embed__actions">
-                <button type="button" className="page-secondary" onClick={() => copy('embed', embedCode)}>
+                <button type="button" className="page-secondary" onClick={() => copy('embed', embedCode, 'Embed code')}>
                   {copied === 'embed' ? <Check size={12} /> : <Copy size={12} />}
                   {copied === 'embed' ? 'Copied' : 'Copy iframe'}
                 </button>

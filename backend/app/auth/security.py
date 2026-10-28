@@ -66,6 +66,39 @@ _secret_lock = threading.Lock()
 _secret_cache: dict[str, bytes] = {}
 
 
+class _HashConcurrencyGate:
+    """Bounded gate for Argon2 work.
+
+    Argon2 is memory-hard (64 MiB by default here), so a burst of sign-ins can
+    push a small Render instance into swapping or OOM. The limit is read from
+    settings on every acquisition, which keeps ``AUTH_HASH_CONCURRENCY``
+    configurable without rebuilding the process.
+    """
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._active = 0
+
+    @staticmethod
+    def limit() -> int:
+        return max(1, int(settings.auth_hash_concurrency or 2))
+
+    def __enter__(self) -> "_HashConcurrencyGate":
+        with self._condition:
+            while self._active >= self.limit():
+                self._condition.wait()
+            self._active += 1
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        with self._condition:
+            self._active = max(0, self._active - 1)
+            self._condition.notify()
+
+
+_hash_gate = _HashConcurrencyGate()
+
+
 def now_ts() -> int:
     return int(time.time())
 
@@ -145,7 +178,8 @@ def decrypt_secret(value: str) -> Optional[str]:
 # ── passwords ────────────────────────────────────────────────────────
 
 def hash_password(password: str) -> str:
-    return _hasher.hash(password)
+    with _hash_gate:
+        return _hasher.hash(password)
 
 
 def _dummy_password_hash() -> str:
@@ -159,14 +193,15 @@ def _dummy_password_hash() -> str:
 
 def verify_password(password: str, stored_hash: Optional[str]) -> Tuple[bool, bool]:
     """Return (valid, needs_rehash); always runs a hash for missing accounts."""
-    candidate = stored_hash or _dummy_password_hash()
-    try:
-        _hasher.verify(candidate, password)
-        valid = stored_hash is not None
-        needs_rehash = bool(valid and _hasher.check_needs_rehash(candidate))
-        return valid, needs_rehash
-    except (VerifyMismatchError, VerificationError, InvalidHashError):
-        return False, False
+    with _hash_gate:
+        candidate = stored_hash or _dummy_password_hash()
+        try:
+            _hasher.verify(candidate, password)
+            valid = stored_hash is not None
+            needs_rehash = bool(valid and _hasher.check_needs_rehash(candidate))
+            return valid, needs_rehash
+        except (VerifyMismatchError, VerificationError, InvalidHashError):
+            return False, False
 
 
 def password_errors(password: str, email: str = "") -> list[str]:

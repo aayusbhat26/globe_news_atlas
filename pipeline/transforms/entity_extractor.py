@@ -9,7 +9,12 @@ import re
 import unicodedata
 from typing import Any, Dict, List
 
-from pipeline.transforms.country_codes import canonical_country, countries_in_text
+from pipeline.transforms.country_codes import (
+    AMBIGUOUS_COUNTRY_NAMES,
+    canonical_country,
+    countries_in_text,
+    country_mention_supported,
+)
 from pipeline.transforms.world_geodata import DEMONYM_MAP, WORLD_LOCATIONS
 
 logger = logging.getLogger("pipeline.transforms.entity_extractor")
@@ -56,6 +61,35 @@ def _ascii(value: str) -> str:
     )
 
 
+def short_code_is_country(text: str, code: str) -> bool:
+    """Return True only when a short code is used as a country, not a currency.
+
+    The live regression was "US$100 million views": a word-boundary match on
+    ``US`` read the currency prefix as the United States. Currency notations
+    (``US$``, ``$US``, ``US $``) and ISO currency codes are never countries.
+    """
+    pattern = re.compile(rf"(?<![A-Za-z]){re.escape(code)}(?![A-Za-z])")
+    for match in pattern.finditer(text or ""):
+        before = (text or "")[max(0, match.start() - 3): match.start()]
+        after = (text or "")[match.end(): match.end() + 3]
+        if before.rstrip().endswith("$"):
+            continue
+        if after.lstrip().startswith("$"):
+            continue
+        return True
+    return False
+
+
+def _ambiguous_mention_allowed(key: str, text: str, headline: bool) -> bool:
+    """Ambiguous country/state names need explicit place evidence in body text."""
+    canonical = canonical_country(key)
+    if not canonical or canonical.lower() not in AMBIGUOUS_COUNTRY_NAMES:
+        return True
+    if headline:
+        return True
+    return country_mention_supported(canonical, text)
+
+
 class EntityExtractor:
     def __init__(self):
         self.nlp = None
@@ -68,33 +102,45 @@ class EntityExtractor:
             except Exception as exc:
                 logger.info("spaCy unavailable, using lexicon extractor: %s", exc)
 
-    def extract(self, text: str) -> Dict[str, List[str]]:
+    def extract(self, text: str, headline: bool = False) -> Dict[str, List[str]]:
+        """Extract entities from article text.
+
+        ``headline=True`` marks the trusted headline/dateline context. Body
+        text uses conservative matching so a bare surname ("Jordan") or a
+        company/place homonym is not promoted to a country.
+        """
         if not text:
             return {"people": [], "organizations": [], "locations": [], "countries": []}
 
         text = text[:5000]
         if self.nlp:
             try:
-                return self._spacy_extract(text)
+                return self._spacy_extract(text, headline)
             except Exception as exc:
                 logger.debug("spaCy extraction failed, falling back: %s", exc)
-        return self._lexicon_extract(text)
+        return self._lexicon_extract(text, headline)
 
-    def _spacy_extract(self, text: str) -> Dict[str, List[str]]:
+    def _spacy_extract(self, text: str, headline: bool = False) -> Dict[str, List[str]]:
         doc = self.nlp(text)
         people = [ent.text for ent in doc.ents if ent.label_ == "PERSON"]
         orgs = [ent.text for ent in doc.ents if ent.label_ == "ORG"]
-        locs = [ent.text for ent in doc.ents if ent.label_ in ("GPE", "LOC")]
-        countries = countries_in_text(text)
+        locs = [
+            ent.text for ent in doc.ents
+            if ent.label_ in ("GPE", "LOC")
+            and _ambiguous_mention_allowed(ent.text, text, headline)
+        ]
+        countries = countries_in_text(text, allow_ambiguous=headline)
         return self._dedupe(people, orgs, locs, countries)
 
-    def _lexicon_extract(self, text: str) -> Dict[str, List[str]]:
+    def _lexicon_extract(self, text: str, headline: bool = False) -> Dict[str, List[str]]:
         locations: List[str] = []
         countries: List[str] = []
         search_text = _ascii(text)
 
         for match in _LOCATION_PATTERN.finditer(search_text):
             key = match.group(1).lower()
+            if not _ambiguous_mention_allowed(key, search_text, headline):
+                continue
             if key in DEMONYM_MAP:
                 target = DEMONYM_MAP[key]
                 canonical = canonical_country(target) or target
@@ -112,7 +158,7 @@ class EntityExtractor:
                 locations.append(location_name)
 
         for code, name in _SHORT_COUNTRY_CODES.items():
-            if re.search(rf"\b{code}\b", search_text):
+            if short_code_is_country(search_text, code):
                 if name not in countries:
                     countries.append(name)
 
@@ -133,7 +179,12 @@ class EntityExtractor:
             if re.search(rf"\b{re.escape(term)}\b", text, re.IGNORECASE) and label not in organisations:
                 organisations.append(label)
 
-        return self._dedupe(people, organisations, ordered, countries_in_text(text) or countries)
+        return self._dedupe(
+            people,
+            organisations,
+            ordered,
+            countries_in_text(text, allow_ambiguous=headline) or countries,
+        )
 
     def _order_by_preposition(self, text: str, locations: List[str]) -> List[str]:
         prepared, other = [], []

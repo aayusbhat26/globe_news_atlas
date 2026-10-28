@@ -20,7 +20,8 @@ Sources, all public domain:
 The 8k texture is used when the GPU supports textures at least 8192 px wide;
 otherwise the 4k version is served. Boundaries are de facto lines. Disputed
 areas are shown with a translucent tint and dashed claim boundaries; they are
-not assigned to one sovereign party. See `docs/DISPUTED_BORDERS_POLICY.md`.
+not assigned to one sovereign party. The Atlas map key states the same policy in
+the app; disputed areas are never assigned to one claimant.
 
 ## Label layers
 

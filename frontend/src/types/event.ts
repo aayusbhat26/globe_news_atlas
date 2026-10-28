@@ -28,6 +28,7 @@ export interface SampleHeadline {
   title: string;
   outlet: string;
   url: string;
+  via_google_news?: boolean;
 }
 
 export interface CoverageColumn {
@@ -52,6 +53,7 @@ export interface CitedSource {
   title: string;
   snippet?: string;
   published_at?: string | null;
+  via_google_news?: boolean;
 }
 
 export interface SearchApiResult {
@@ -91,6 +93,10 @@ export interface EventDetailData {
   outlet_count: number;
   article_count: number;
   source_count: number;
+  /** True number of sources attached to the event, when the API reports it. */
+  sources_total?: number;
+  /** Number of source links included in this payload, when the API reports it. */
+  sources_shown?: number;
   is_single_source: boolean;
   has_coverage_gap: boolean;
   has_official_source: boolean;

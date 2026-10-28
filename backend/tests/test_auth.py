@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.auth import google as google_service
+from app.auth import security as auth_security
+from app.auth import service as auth_service
+from app.auth.errors import AuthError
 from app.auth.security import (
     _totp_at,
+    encrypt_secret,
+    hash_token,
+    new_opaque_token,
     now_ts,
     sanitize_next_path,
     verify_password,
@@ -215,6 +223,57 @@ def test_duplicate_signup_uses_generic_message(client):
     assert second.status_code == 201
     assert second.json()["status"] == "check_email"
     assert second.json()["message"].startswith("If this address")
+    # New and existing accounts must be indistinguishable in the response.
+    assert second.json()["message"] == first.json()["message"]
+    assert second.json()["status"] == first.json()["status"]
+    assert set(second.json()) == set(first.json())
+
+
+def test_signup_does_not_reveal_verified_accounts(client):
+    create_verified_account(client, "known@example.com")
+    duplicate = post(
+        client,
+        "/v1/auth/signup",
+        {
+            "email": "known@example.com",
+            "password": "Another-Strong-91!",
+            "accept_terms": True,
+        },
+    )
+    assert duplicate.status_code == 201
+    assert duplicate.json()["status"] == "check_email"
+    assert duplicate.json()["message"].startswith("If this address")
+    assert "href" not in duplicate.json()["message"].lower()
+    assert "already" not in duplicate.json()["message"].lower()
+
+
+def test_unverified_login_is_blocked_until_email_verification(client):
+    signup = post(
+        client,
+        "/v1/auth/signup",
+        {
+            "email": "unconfirmed@example.com",
+            "password": PASSWORD,
+            "display_name": "",
+            "accept_terms": True,
+        },
+    )
+    verification_token = token_from_link(signup.json()["dev_verification_link"])
+
+    blocked = login(client, email="unconfirmed@example.com")
+    assert blocked.status_code == 403
+    assert blocked.json()["detail"]["code"] == "email_not_verified"
+    assert "confirm" in blocked.json()["detail"]["message"].lower()
+    assert client.cookies.get("gna_session") is None
+
+    verified = post(client, "/v1/auth/email/verify", {"token": verification_token})
+    assert verified.status_code == 200
+    assert verified.json()["user"]["email_verified"] is True
+    post(client, "/v1/auth/logout", {})
+
+    signed_in = login(client, email="unconfirmed@example.com")
+    assert signed_in.status_code == 200, signed_in.text
+    assert signed_in.json()["user"]["email_verified"] is True
 
 
 def test_login_failures_are_generic_and_lock_the_account(client):
@@ -232,6 +291,67 @@ def test_login_failures_are_generic_and_lock_the_account(client):
     locked = login(client)
     assert locked.status_code == 429
     assert locked.json()["detail"]["code"] == "account_locked"
+
+
+def test_concurrent_login_failures_all_count(auth_env):
+    user = auth_store.create_user(
+        email="concurrent@example.com",
+        display_name="Concurrent Reader",
+        password_hash="not-used-here",
+        email_verified=True,
+    )
+    user_id = user["user_id"]
+    failures = 12
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        list(
+            pool.map(
+                lambda _: auth_store.increment_login_failure(user_id, 100),
+                range(failures),
+            )
+        )
+
+    fresh = auth_store.get_user_by_id(user_id)
+    assert int(fresh["failed_login_count"]) == failures
+
+
+def test_password_hash_concurrency_is_bounded(monkeypatch):
+    class SlowHasher:
+        def __init__(self) -> None:
+            import threading
+
+            self.active = 0
+            self.peak = 0
+            self._lock = threading.Lock()
+
+        def verify(self, stored: str, password: str) -> bool:
+            import time
+
+            with self._lock:
+                self.active += 1
+                self.peak = max(self.peak, self.active)
+            time.sleep(0.03)
+            with self._lock:
+                self.active -= 1
+            return True
+
+        def check_needs_rehash(self, stored: str) -> bool:
+            return False
+
+    fake = SlowHasher()
+    monkeypatch.setattr(auth_security, "_hasher", fake)
+    monkeypatch.setattr(settings, "auth_hash_concurrency", 2)
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        results = list(
+            pool.map(
+                lambda _: auth_security.verify_password("password", "stored-hash"),
+                range(6),
+            )
+        )
+
+    assert all(result[0] is True for result in results)
+    assert fake.peak <= 2
 
 
 def test_login_remember_and_csrf_rotation(client):
@@ -295,6 +415,154 @@ def test_profile_and_password_change_revoke_other_sessions(client):
     assert login(other, password=NEW_PASSWORD).status_code == 200
 
 
+def test_password_change_invalidates_outstanding_reset_token(client):
+    create_verified_account(client)
+    forgot = post(client, "/v1/auth/password/forgot", {"email": "reader@example.com"})
+    reset_token = token_from_link(forgot.json()["dev_reset_link"])
+
+    changed = post(
+        client,
+        "/v1/auth/password/change",
+        {"current_password": PASSWORD, "new_password": NEW_PASSWORD},
+    )
+    assert changed.status_code == 200
+    check = client.get(f"/v1/auth/password/reset/check?token={reset_token}")
+    assert check.json()["valid"] is False
+
+
+def test_password_reset_invalidates_verification_tokens(client):
+    signup = post(
+        client,
+        "/v1/auth/signup",
+        {
+            "email": "reset-unverified@example.com",
+            "password": PASSWORD,
+            "accept_terms": True,
+        },
+    )
+    verify_token = token_from_link(signup.json()["dev_verification_link"])
+
+    forgot = post(
+        client, "/v1/auth/password/forgot", {"email": "reset-unverified@example.com"}
+    )
+    reset_token = token_from_link(forgot.json()["dev_reset_link"])
+    reset = post(
+        client,
+        "/v1/auth/password/reset",
+        {"token": reset_token, "password": NEW_PASSWORD},
+    )
+    assert reset.status_code == 200
+
+    check = client.get(f"/v1/auth/email/verify/check?token={verify_token}")
+    assert check.json()["valid"] is False
+    assert login(client, email="reset-unverified@example.com", password=NEW_PASSWORD).status_code == 200
+
+
+def test_two_factor_enable_revokes_other_sessions(client):
+    create_verified_account(client)
+    other = TestClient(app)
+    csrf(other)
+    assert login(other).status_code == 200
+    assert other.get("/v1/auth/me").json()["user"]["email"] == "reader@example.com"
+
+    setup = post(client, "/v1/auth/2fa/setup", {"password": PASSWORD})
+    secret = setup.json()["secret"]
+    step = now_ts() // 30
+    enabled = post(client, "/v1/auth/2fa/enable", {"code": _totp_at(secret, step)})
+    assert enabled.status_code == 200, enabled.text
+    assert enabled.json()["user"]["totp_enabled"] is True
+
+    assert client.get("/v1/auth/me").json()["user"] is not None
+    assert other.get("/v1/auth/me").json()["user"] is None
+
+
+def test_single_use_store_claims(auth_env):
+    user = auth_store.create_user(
+        email="claims@example.com",
+        display_name="Claims Reader",
+        password_hash="not-used-here",
+        email_verified=True,
+    )
+    user_id = user["user_id"]
+
+    challenge_hash = "challenge-hash-single-use"
+    auth_store.create_login_challenge(
+        token_hash=challenge_hash,
+        user_id=user_id,
+        remember=False,
+        ip="127.0.0.1",
+        user_agent="pytest",
+        expires_at=now_ts() + 300,
+    )
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        consumed = list(
+            pool.map(
+                lambda _: auth_store.consume_login_challenge(challenge_hash),
+                range(8),
+            )
+        )
+    assert sum(1 for item in consumed if item) == 1
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        steps = list(pool.map(lambda _: auth_store.claim_totp_step(user_id, 12345), range(8)))
+    assert sum(1 for item in steps if item) == 1
+
+    auth_store.replace_recovery_codes(user_id, ["hash-one"])
+    code_id = auth_store.list_recovery_codes(user_id)[0]["id"]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        used = list(
+            pool.map(
+                lambda _: auth_store.mark_recovery_code_used(code_id, user_id),
+                range(8),
+            )
+        )
+    assert sum(1 for item in used if item) == 1
+
+
+def test_concurrent_two_factor_completion_issues_one_session(auth_env):
+    user = auth_store.create_user(
+        email="concurrent-2fa@example.com",
+        display_name="Concurrent 2FA",
+        password_hash="not-used-here",
+        email_verified=True,
+    )
+    user_id = user["user_id"]
+    secret = "JBSWY3DPEHPK3PXP"
+    auth_store.set_totp_pending(user_id, encrypt_secret(secret))
+    auth_store.enable_totp(user_id)
+
+    challenge = new_opaque_token(32)
+    auth_store.create_login_challenge(
+        token_hash=hash_token(challenge),
+        user_id=user_id,
+        remember=False,
+        ip="127.0.0.1",
+        user_agent="pytest",
+        expires_at=now_ts() + 300,
+    )
+    code = _totp_at(secret, now_ts() // 30)
+    barrier = threading.Barrier(6)
+
+    def attempt(_: int) -> bool:
+        barrier.wait()
+        try:
+            result = auth_service.complete_two_factor(
+                challenge_token=challenge,
+                code=code,
+                ip="127.0.0.1",
+                user_agent="pytest",
+            )
+        except AuthError:
+            return False
+        return bool(result.token)
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        results = list(pool.map(attempt, range(6)))
+
+    assert sum(1 for item in results if item) == 1
+    assert len(auth_store.list_sessions(user_id)) == 1
+
+
 def test_session_list_and_revocation(client):
     create_verified_account(client)
     other = TestClient(app)
@@ -317,6 +585,28 @@ def test_session_list_and_revocation(client):
     revoke_others = post(client, "/v1/auth/sessions/revoke-others", {})
     assert revoke_others.status_code == 200
     assert other.get("/v1/auth/me").json()["user"] is None
+
+
+def test_store_truncates_client_ip(auth_env):
+    user = auth_store.create_user(
+        email="ip@example.com",
+        display_name="IP Reader",
+        password_hash="not-used-here",
+        email_verified=True,
+    )
+    token_hash = "session-ip-token-hash"
+    auth_store.create_session(
+        user_id=user["user_id"],
+        token_hash=token_hash,
+        auth_method="password",
+        remember=False,
+        ip="203.0.113.10" + "-x" * 80,
+        user_agent="pytest",
+        expires_at=now_ts() + 3600,
+        absolute_expires_at=now_ts() + 7200,
+    )
+    session = auth_store.get_session(token_hash)
+    assert len(session["ip"]) <= 45
 
 
 def test_expired_session_is_rejected(client):
@@ -398,6 +688,15 @@ def test_two_factor_enrollment_login_and_recovery_code(client):
     assert me["totp_enabled"] is True
     assert me["recovery_codes_remaining"] == 10
 
+    # The challenge is consumed exactly once.
+    duplicate = post(
+        client,
+        "/v1/auth/login/2fa",
+        {"challenge_token": challenge, "code": _totp_at(secret, next_step)},
+    )
+    assert duplicate.status_code == 400
+    assert duplicate.json()["detail"]["code"] == "challenge_expired"
+
     assert post(client, "/v1/auth/logout", {}).status_code == 200
     challenged = login(client).json()
     recovery = post(
@@ -408,10 +707,28 @@ def test_two_factor_enrollment_login_and_recovery_code(client):
     assert recovery.status_code == 200, recovery.text
     assert client.get("/v1/auth/me").json()["user"]["recovery_codes_remaining"] == 9
 
+    # A spent recovery code cannot be replayed on a new challenge.
+    assert post(client, "/v1/auth/logout", {}).status_code == 200
+    replay_challenge = login(client).json()["challenge_token"]
+    replay = post(
+        client,
+        "/v1/auth/login/2fa",
+        {"challenge_token": replay_challenge, "code": codes[0]},
+    )
+    assert replay.status_code == 401
+    assert replay.json()["detail"]["code"] == "invalid_code"
+
+    second_recovery = post(
+        client,
+        "/v1/auth/login/2fa",
+        {"challenge_token": replay_challenge, "code": codes[1]},
+    )
+    assert second_recovery.status_code == 200, second_recovery.text
+
     disable = post(
         client,
         "/v1/auth/2fa/disable",
-        {"password": PASSWORD, "code": codes[1]},
+        {"password": PASSWORD, "code": codes[2]},
     )
     assert disable.status_code == 200, disable.text
     assert disable.json()["user"]["totp_enabled"] is False
@@ -544,6 +861,119 @@ def test_google_start_and_callback(monkeypatch, client):
     )
     assert bad.status_code == 302
     assert "error=google_state" in bad.headers["location"]
+
+
+def _mock_google_signin(monkeypatch, email: str, subject: str) -> None:
+    monkeypatch.setattr(settings, "google_client_id", "test-client-id")
+    monkeypatch.setattr(settings, "google_client_secret", "test-client-secret")
+    monkeypatch.setattr(
+        google_service,
+        "exchange_code",
+        lambda code, verifier, callback: "signed-id-token",
+    )
+    monkeypatch.setattr(
+        google_service,
+        "verify_id_token",
+        lambda token, nonce: google_service.GoogleProfile(
+            subject=subject,
+            email=email,
+            email_verified=True,
+            name="OAuth Reader",
+            picture=None,
+        ),
+    )
+
+
+def _google_callback(client: TestClient, next_path: str = "/account") -> dict:
+    start = client.get(
+        f"/v1/auth/google/start?next={next_path}", follow_redirects=False
+    )
+    assert start.status_code == 302
+    state = parse_qs(urlsplit(start.headers["location"]).query)["state"][0]
+    callback = client.get(
+        f"/v1/auth/google/callback?code=abc&state={state}",
+        follow_redirects=False,
+    )
+    assert callback.status_code == 302
+    return callback
+
+
+def test_google_does_not_auto_link_unverified_password_account(monkeypatch, client):
+    signup = post(
+        client,
+        "/v1/auth/signup",
+        {
+            "email": "victim@example.com",
+            "password": PASSWORD,
+            "accept_terms": True,
+        },
+    )
+    assert signup.status_code == 201
+    _mock_google_signin(monkeypatch, "victim@example.com", "google-victim")
+
+    callback = _google_callback(client)
+    assert "error=google_account_unverified" in callback.headers["location"]
+    assert client.cookies.get("gna_session") is None
+
+    row = auth_store.get_user_by_email("victim@example.com")
+    assert row["email_verified_at"] is None
+    assert auth_store.get_identity("google", "google-victim") is None
+
+
+def test_google_auto_links_only_verified_existing_account(monkeypatch, client):
+    create_verified_account(client, "verified-link@example.com")
+    post(client, "/v1/auth/logout", {})
+    _mock_google_signin(monkeypatch, "verified-link@example.com", "google-verified")
+
+    callback = _google_callback(client)
+    assert "error=" not in callback.headers["location"]
+    me = client.get("/v1/auth/me").json()["user"]
+    assert me["email"] == "verified-link@example.com"
+    assert me["google_linked"] is True
+    assert me["has_password"] is True
+    assert auth_store.get_identity("google", "google-verified") is not None
+
+
+def test_google_only_account_requires_recent_session_for_password_and_delete(
+    monkeypatch, client
+):
+    _mock_google_signin(monkeypatch, "oauth-only@example.com", "google-oauth-only")
+    callback = _google_callback(client)
+    assert "error=" not in callback.headers["location"]
+    me = client.get("/v1/auth/me").json()["user"]
+    assert me["has_password"] is False
+    assert me["totp_enabled"] is False
+
+    with auth_store.connection() as conn:
+        conn.execute("UPDATE sessions SET created_at = ?", (now_ts() - 1200,))
+
+    stale_password = post(
+        client,
+        "/v1/auth/password/change",
+        {"new_password": NEW_PASSWORD},
+    )
+    assert stale_password.status_code == 403
+    assert stale_password.json()["detail"]["code"] == "reauth_required"
+
+    stale_delete = post(
+        client,
+        "/v1/auth/account/delete",
+        {"confirm_email": "oauth-only@example.com"},
+    )
+    assert stale_delete.status_code == 403
+    assert stale_delete.json()["detail"]["code"] == "reauth_required"
+    assert client.get("/v1/auth/me").json()["user"] is not None
+
+    # A fresh Google sign-in satisfies the re-authentication window.
+    refreshed = _google_callback(client)
+    assert "error=" not in refreshed.headers["location"]
+    changed = post(
+        client,
+        "/v1/auth/password/change",
+        {"new_password": NEW_PASSWORD},
+    )
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["user"]["has_password"] is True
 
 
 def test_google_connect_requires_signed_in_user(monkeypatch, client):

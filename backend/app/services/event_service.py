@@ -62,6 +62,23 @@ def _spectrum(value: Any) -> SpectrumBar:
     )
 
 
+def _framing_note(camp: str, count: int) -> str:
+    """Readable coverage note; avoids "unrated-rated" and "outlet(s)"."""
+    label = "unrated" if camp == "unrated" else f"{camp}-rated"
+    noun = "outlet" if count == 1 else "outlets"
+    return f"{count} {label} {noun} reported this event."
+
+
+def _normalize_framing_note(note: str, count: int) -> str:
+    """Repair older pipeline notes without rewriting their meaning."""
+    cleaned = note.replace("unrated-rated", "unrated")
+    if "outlet(s)" in cleaned:
+        cleaned = cleaned.replace(
+            "outlet(s)", "outlet" if count == 1 else "outlets"
+        )
+    return cleaned
+
+
 class EventService:
     def _find_event(self, event_id: str) -> Optional[Tuple[Dict[str, Any], str]]:
         for window in ("30d", "24h", "7d", "1h"):
@@ -125,12 +142,15 @@ class EventService:
         for column in detail.get("coverage") or []:
             if not isinstance(column, dict):
                 continue
+            outlet_count = int(column.get("outlet_count") or 0)
             coverage.append(
                 CoverageColumn(
                     camp=_text(column.get("camp")),
-                    outlet_count=int(column.get("outlet_count") or 0),
+                    outlet_count=outlet_count,
                     article_count=int(column.get("article_count") or 0),
-                    framing_note=_text(column.get("framing_note")),
+                    framing_note=_normalize_framing_note(
+                        _text(column.get("framing_note")), outlet_count
+                    ),
                     sample_headlines=[
                         headline
                         for headline in column.get("sample_headlines") or []
@@ -168,6 +188,8 @@ class EventService:
             outlet_count=outlets,
             article_count=int(detail.get("article_count") or 0),
             source_count=int(detail.get("source_count") or 0),
+            sources_total=detail.get("sources_total"),
+            sources_shown=detail.get("sources_shown"),
             is_single_source=bool(detail.get("is_single_source")),
             has_coverage_gap=bool(detail.get("has_coverage_gap")),
             has_official_source=bool(detail.get("has_official_source")),
@@ -206,7 +228,7 @@ class EventService:
                 camp=camp,
                 outlet_count=count,
                 article_count=count,
-                framing_note=f"{count} {camp}-rated outlet(s) reported this event.",
+                framing_note=_framing_note(camp, count),
                 sample_headlines=[],
             )
             for camp, count in categories

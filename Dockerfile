@@ -21,6 +21,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app \
     ENVIRONMENT=production \
     DATA_DIR=/app/data \
+    SEEDS_DIR=/app/seeds \
     FRONTEND_DIST=/app/frontend/dist \
     PORT=8000
 
@@ -38,6 +39,9 @@ COPY backend/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY backend/app /app/app
+# Curated outlet/subreddit seeds are tracked in git and required at runtime by
+# /v1/outlets. Keep seeds/ out of .dockerignore or the endpoint returns empty.
+COPY seeds /app/seeds
 COPY --from=frontend /build/frontend/dist /app/frontend/dist
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh \
@@ -46,4 +50,9 @@ RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh \
 EXPOSE 8000
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
-CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers --forwarded-allow-ips='*'"]
+# Never enable Uvicorn --proxy-headers / --forwarded-allow-ips: trusting a
+# client-supplied X-Forwarded-For lets anyone spoof the client IP. Uvicorn
+# defaults proxy headers to on, so disable them explicitly. Render/Cloudflare
+# metadata is handled in app/client_ip.py, gated by TRUST_PROXY_HEADERS, which
+# reads only the platform-set CF-Connecting-IP header.
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --http h11 --no-proxy-headers"]

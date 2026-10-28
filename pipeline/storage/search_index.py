@@ -6,6 +6,7 @@ full article body.
 """
 import logging
 import os
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,8 +18,26 @@ MAX_BODY_CHARS = 8000
 MAX_ARTICLE_CHARS = 2500
 
 
+_ATTRIBUTION_PREFIX = re.compile(
+    r"^\s*[^.!?\n]{1,120}?\s+(?:reports?|adds?|says?|said)\s*:\s*",
+    re.IGNORECASE,
+)
+
+
 def _text(value: Any) -> str:
     return "" if value is None else str(value).strip()
+
+
+def indexable_summary(summary: Any) -> str:
+    """Strip the synthetic "Outlet reports:" prefix before indexing.
+
+    The prefix repeats the outlet name, so indexing it made a query for "India"
+    match unrelated Times of India stories.
+    """
+    cleaned = _text(summary)
+    if not cleaned:
+        return ""
+    return _ATTRIBUTION_PREFIX.sub("", cleaned, count=1).strip()
 
 
 def _event_rows(
@@ -65,7 +84,7 @@ def _event_rows(
                     "event_id": event_id,
                     "title": _text(event.get("t")),
                     "body": "\n".join(body_parts),
-                    "summary": _text(event.get("sum")),
+                    "summary": indexable_summary(event.get("sum")),
                     "countries": ", ".join(context.get("countries") or []),
                     "location": _text(event.get("loc")),
                     "outlet": _text(event.get("src")),
@@ -110,7 +129,7 @@ def build_search_index(
                 summary,
                 countries,
                 location,
-                outlet,
+                outlet UNINDEXED,
                 category UNINDEXED,
                 updated_at UNINDEXED,
                 importance UNINDEXED,

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowUpRight,
   Bookmark,
@@ -20,7 +20,7 @@ import {
   markWatchlineSeen,
   removeWatchlineEntry,
 } from '../../services/atlas';
-import { ApiError } from '../../services/api';
+import { ApiError, isAbortError } from '../../services/api';
 import { getCategoryColor } from '../../utils/colors';
 import { formatRelativeTime } from '../../utils/time';
 import { copyToClipboard } from '../../utils/auth';
@@ -50,7 +50,11 @@ export const WatchlinePage: React.FC = () => {
   const [feed, setFeed] = useState<WatchlineFeed | null>(null);
   const [entries, setEntries] = useState<WatchlineEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [reloadToken, setReloadToken] = useState(0);
+  const feedRef = useRef<WatchlineFeed | null>(null);
+  const requestSeq = useRef(0);
   const [place, setPlace] = useState('');
   const [adding, setAdding] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -64,19 +68,28 @@ export const WatchlinePage: React.FC = () => {
   const isPublic = !auth.loading && !auth.user && publicKeys.length > 0;
   const signedIn = Boolean(auth.user);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async (signal?: AbortSignal) => {
+    const seq = ++requestSeq.current;
+    const hasFeed = Boolean(feedRef.current);
+    setLoading(!hasFeed);
+    setRefreshing(hasFeed);
     setError(null);
     try {
       const data = isPublic
-        ? await fetchPublicWatchline(publicKeys, timeWindow)
-        : await fetchWatchline(timeWindow);
+        ? await fetchPublicWatchline(publicKeys, timeWindow, signal)
+        : await fetchWatchline(timeWindow, signal);
+      if (seq !== requestSeq.current) return;
+      feedRef.current = data;
       setFeed(data);
       setEntries(data.entries);
     } catch (err) {
+      if (seq !== requestSeq.current || isAbortError(err)) return;
       setError(errorMessage(err));
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   }, [isPublic, publicKeys, timeWindow]);
 
@@ -86,8 +99,10 @@ export const WatchlinePage: React.FC = () => {
       setLoading(false);
       return;
     }
-    load();
-  }, [auth.loading, auth.user, load, publicKeys.length]);
+    const controller = new AbortController();
+    load(controller.signal);
+    return () => controller.abort();
+  }, [auth.loading, auth.user, load, publicKeys.length, reloadToken]);
 
   useEffect(() => {
     if (!signedIn) return;
@@ -223,6 +238,11 @@ export const WatchlinePage: React.FC = () => {
               </button>
             ))}
           </div>
+          {refreshing && (
+            <span className="page-refreshing" role="status">
+              Refreshing…
+            </span>
+          )}
           {entries.length > 0 && (
             <button type="button" className="page-secondary" onClick={handleShare}>
               {copied ? <Check size={13} /> : <Link2 size={13} />}
@@ -257,6 +277,13 @@ export const WatchlinePage: React.FC = () => {
           />
         </div>
       )}
+      <p className="sr-only" role="status" aria-live="polite">
+        {shareFallback
+          ? 'The clipboard was unavailable. Select and copy the desk link shown above.'
+          : copied
+            ? 'Desk link copied.'
+            : ''}
+      </p>
 
       {feed && (
         <dl className="page-count-strip">
@@ -404,7 +431,13 @@ export const WatchlinePage: React.FC = () => {
           <div className="page-error" role="alert">
             <h2>The desk could not be read.</h2>
             <p>{error}</p>
-            <button type="button" className="page-secondary" onClick={load}>Try again</button>
+            <button
+              type="button"
+              className="page-secondary"
+              onClick={() => setReloadToken((token) => token + 1)}
+            >
+              Try again
+            </button>
           </div>
         ) : !auth.loading && !signedIn && !isPublic ? (
           <div className="page-empty">
@@ -419,6 +452,21 @@ export const WatchlinePage: React.FC = () => {
               onClick={() => navigate(`/login?next=${encodeURIComponent('/watchline')}`)}
             >
               Sign in to open a desk
+            </button>
+          </div>
+        ) : feed && feed.available === false ? (
+          <div className="page-empty" role="status">
+            <h2>The desk is temporarily unavailable.</h2>
+            <p>
+              The snapshot is still being assembled. Your pins are kept; retry in a
+              moment.
+            </p>
+            <button
+              type="button"
+              className="page-secondary"
+              onClick={() => setReloadToken((token) => token + 1)}
+            >
+              Try again
             </button>
           </div>
         ) : feed && feed.feed.length === 0 ? (

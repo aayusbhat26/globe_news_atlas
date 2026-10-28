@@ -127,22 +127,22 @@ class GDELTFetcher(BaseFetcher):
         return None
 
     def fetch(self) -> List[Dict[str, Any]]:
+        self.begin_fetch()
         if self.is_circuit_open():
             logger.info("GDELT event fetch skipped: circuit breaker is open.")
-            return []
+            return self.finish_fetch([], skipped_reason="circuit breaker open")
         try:
             url = self._export_url()
             if not url:
                 logger.warning("GDELT lastupdate did not contain an export file.")
-                self.record_failure()
-                return []
+                return self.finish_fetch([], status="failed", error="lastupdate has no export file")
 
             response = self.session.get(url, timeout=60)
             response.raise_for_status()
             with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
                 name = next((n for n in archive.namelist() if n.endswith(".CSV") or n.endswith(".csv")), None)
                 if not name:
-                    return []
+                    return self.finish_fetch([], status="empty", error="archive contained no CSV")
                 with archive.open(name) as handle:
                     text = handle.read().decode("utf-8", errors="replace")
 
@@ -177,7 +177,6 @@ class GDELTFetcher(BaseFetcher):
                 )
 
             ranked = sorted(unique.values(), key=rank, reverse=True)[: self.max_events]
-            self.record_success()
             logger.info(
                 "GDELT events: %d parsed, %d unique, %d kept from %s",
                 len(candidates),
@@ -185,11 +184,10 @@ class GDELTFetcher(BaseFetcher):
                 len(ranked),
                 url.rsplit("/", 1)[-1],
             )
-            return ranked
+            return self.finish_fetch(ranked)
         except Exception as exc:
             logger.warning("GDELT event fetch failed: %s", exc)
-            self.record_failure()
-            return []
+            return self.finish_fetch([], status="failed", error=f"{type(exc).__name__}: {exc}")
 
     def _parse_row(self, row: List[str]) -> Optional[Dict[str, Any]]:
         # GDELT 2.0 export layout (61 tab-separated columns, 0-based indices):
@@ -338,24 +336,30 @@ class GDELTDocFetcher(BaseFetcher):
         return {}
 
     def fetch(self) -> List[Dict[str, Any]]:
+        self.begin_fetch()
         if self.is_circuit_open():
             logger.info("GDELT DOC fetch skipped: circuit breaker is open.")
-            return []
+            return self.finish_fetch([], skipped_reason="circuit breaker open")
 
         seen: set = set()
         records: List[Dict[str, Any]] = []
         failures = 0
+        feed_errors: Dict[str, str] = {}
+        attempted = 0
         consecutive_failures = 0
         for query in self.queries:
+            attempted += 1
             try:
                 payload = self._query(query)
             except GDELTRateLimited:
                 logger.warning("GDELT DOC is rate-limiting this client; stopping DOC queries for this run.")
                 failures += 1
+                feed_errors[query] = "rate limited"
                 break
             except Exception as exc:
                 logger.warning("GDELT DOC query %r failed: %s", query, exc)
                 failures += 1
+                feed_errors[query] = f"{type(exc).__name__}: {exc}"[:200]
                 consecutive_failures += 1
                 if consecutive_failures >= 3:
                     logger.warning("GDELT DOC is rate-limiting; stopping DOC queries for this run.")
@@ -399,11 +403,21 @@ class GDELTDocFetcher(BaseFetcher):
             if len(records) >= settings.gdelt_doc_max_articles:
                 break
 
-        if records:
-            self.record_success()
-        elif failures:
-            self.record_failure()
-        else:
-            self.record_success()
         logger.info("GDELT DOC gathered %d articles (%d query failures)", len(records), failures)
-        return records
+        if failures and records:
+            return self.finish_fetch(records, status="partial", feed_errors=feed_errors)
+        if failures and not records:
+            if attempted and failures >= attempted:
+                return self.finish_fetch(
+                    records,
+                    status="failed",
+                    error="all GDELT DOC queries failed",
+                    feed_errors=feed_errors,
+                )
+            return self.finish_fetch(
+                records,
+                status="empty",
+                error="some GDELT DOC queries failed; no articles returned",
+                feed_errors=feed_errors,
+            )
+        return self.finish_fetch(records)

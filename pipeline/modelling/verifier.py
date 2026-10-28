@@ -10,6 +10,17 @@ BOILERPLATE = (
     "verified reporting confirms",
     "multi-perspective analysis",
 )
+_NUMBER_RE = re.compile(r"(?<![\w.])\d+(?:[.,]\d+)?(?![\w])")
+_PROPER_RE = re.compile(r"\b[A-Z][A-Za-z'’-]{2,}(?:\s+[A-Z][A-Za-z'’-]{2,}){0,3}\b")
+_COMMON_ENTITIES = {
+    "the", "this", "that", "these", "those", "there", "their", "they",
+    "a", "an", "in", "on", "at", "by", "for", "from", "with", "without",
+    "after", "before", "during", "amid", "and", "but", "or", "as", "of",
+    "reports", "report", "according", "officials", "government", "police",
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday",
+    "sunday", "january", "february", "march", "april", "may", "june",
+    "july", "august", "september", "october", "november", "december",
+}
 STOPWORDS = {
     "about", "after", "again", "against", "also", "amid", "among", "another",
     "because", "before", "being", "between", "could", "during", "every", "first",
@@ -46,6 +57,46 @@ class Verifier:
         source_text = " ".join(
             f"{article.get('title', '')} {article.get('snippet', '')}" for article in articles
         ).lower()
+
+        # Numeric grounding: a summary may not introduce counts, dates or
+        # casualty figures that are absent from the supplied reporting.
+        source_numbers = {
+            value.replace(",", "") for value in _NUMBER_RE.findall(source_text)
+        }
+        summary_numbers = {
+            value.replace(",", "") for value in _NUMBER_RE.findall(lowered)
+        }
+        missing_numbers = sorted(summary_numbers - source_numbers)
+        if missing_numbers:
+            return {
+                "overall_pass": False,
+                "reason": f"Unsupported numeric claims: {', '.join(missing_numbers[:4])}",
+                "grounding_ratio": 0.0,
+                "numbers_ratio": 0.0,
+            }
+
+        # Entity grounding: fabricated names/places are rejected even when
+        # enough ordinary words overlap.
+        source_lower = source_text.lower()
+        proper = []
+        for match in _PROPER_RE.finditer(summary):
+            entity = " ".join(match.group(0).split())
+            if entity.lower() in _COMMON_ENTITIES or len(entity) < 3:
+                continue
+            proper.append(entity)
+        if proper:
+            found_entities = sum(1 for entity in proper if entity.lower() in source_lower)
+            entity_ratio = found_entities / len(proper)
+            if entity_ratio < 0.5:
+                return {
+                    "overall_pass": False,
+                    "reason": "Summary names entities not present in the supplied reporting",
+                    "grounding_ratio": 0.0,
+                    "entity_ratio": round(entity_ratio, 2),
+                }
+        else:
+            entity_ratio = 1.0
+
         words = []
         for word in lowered.split():
             cleaned = word.strip(".,;:\"'()[]!?—–")
@@ -59,5 +110,6 @@ class Verifier:
         return {
             "overall_pass": overall,
             "grounding_ratio": round(ratio, 2),
+            "entity_ratio": round(entity_ratio, 2),
             "reason": None if overall else "Summary not sufficiently grounded in sources",
         }

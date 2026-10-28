@@ -10,6 +10,7 @@ One run:
 
 No synthetic articles, hash-based geocoding or index-sliced windows are used.
 """
+import hashlib
 import json
 import logging
 import math
@@ -37,7 +38,7 @@ from pipeline.ingestion import (
     RSSFetcher,
     USGSFetcher,
 )
-from pipeline.ingestion.schema import parse_datetime, stable_id
+from pipeline.ingestion.schema import canonicalize_url, parse_datetime, stable_id
 from pipeline.ingestion.news_crawler import CrawlResult, NewsCrawler
 from pipeline.storage.search_index import build_search_index
 from pipeline.modelling import (
@@ -52,6 +53,7 @@ from pipeline.modelling import (
 )
 from pipeline.modelling.coverage_analyser import representative_articles
 from pipeline.modelling.replay import ReplayBuilder
+from pipeline.modelling.snapshot_generator import select_window_events
 from pipeline.orchestration.alerts import send_discord_alert
 from pipeline.storage import HuggingFaceSync, LocalParquetStore
 from pipeline.transforms import (
@@ -171,6 +173,26 @@ def _sanitise_row(row: Dict[str, Any]) -> Dict[str, Any]:
     return row
 
 
+def _merge_entities(
+    headline: Optional[Dict[str, List[str]]],
+    body: Optional[Dict[str, List[str]]],
+) -> Dict[str, List[str]]:
+    """Merge headline and body entities with the headline first."""
+    merged: Dict[str, List[str]] = {}
+    for field in ("people", "organizations", "locations", "countries"):
+        values: List[str] = []
+        seen: set = set()
+        for source in (headline or {}, body or {}):
+            for value in source.get(field) or []:
+                key = str(value).strip().lower()
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                values.append(str(value).strip())
+        merged[field] = values
+    return merged
+
+
 class PipelineFlow:
     """Runs the medallion pipeline and keeps the Parquet lake + HF mirror current."""
 
@@ -191,7 +213,9 @@ class PipelineFlow:
         self.last_error: Optional[Exception] = None
 
         # Silver transforms
-        self.dedup = Deduplicator()
+        self.dedup = Deduplicator(
+            max_minhash_articles=getattr(self.settings, "dedupe_minhash_max_articles", 20000)
+        )
         self.geocoder = Geocoder()
         self.entity_extractor = EntityExtractor()
         self.embedder = Embedder()
@@ -352,7 +376,14 @@ class PipelineFlow:
 
         previous_events = self._read_event_cache()
         previous_details = self._read_detail_cache()
-        events, contexts = self._build_events(clusters, social_items, previous_events)
+        previous_index = self._previous_event_index(previous_details)
+        events, contexts = self._build_events(
+            clusters,
+            social_items,
+            previous_events,
+            previous_index=previous_index,
+        )
+        events = self._merge_historical_events(events, contexts, previous_events, previous_details)
 
         arcs = self.relation_extractor.extract_relations(
             [
@@ -361,26 +392,30 @@ class PipelineFlow:
                     "title": event["t"],
                     "category": event["cat"],
                     "importance": event["imp"],
-                    "countries": contexts[event["id"]]["countries"],
+                    "countries": contexts[event["id"]].get("countries") or [],
                 }
                 for event in events
+                if contexts.get(event["id"])
             ]
         )
 
         snapshots = self._build_snapshots(events, arcs)
         wanted_ids = {event["id"] for snapshot in snapshots.values() for event in snapshot.get("events", [])}
-        details = self._build_details(wanted_ids, contexts, previous_details, arcs)
+        # Replay frames from earlier runs must keep resolving on /v1/events.
+        detail_ids = set(wanted_ids) | self._existing_replay_ids()
+        details = self._build_details(detail_ids, contexts, previous_details, arcs)
 
         self._write_gold(events, arcs, snapshots, details, wanted_ids, contexts)
-        self._write_json("event_details.json", details)
-        self._build_search_index(snapshots, contexts)
 
         replay: Optional[Dict[str, Any]] = None
         try:
             replay = self.replay.build(self.now)
             self._write_json("rewind.json", replay)
+            details = self._merge_replay_details(details, replay, previous_details)
         except Exception as exc:
             logger.warning("Could not build the replay archive: %s", exc)
+        self._write_json("event_details.json", details)
+        self._build_search_index(snapshots, contexts)
 
         quality = DataQualityChecker(self.serving_dir).check_all()
         self._write_manifest(
@@ -500,7 +535,19 @@ class PipelineFlow:
         fetchers = self._fetchers()
         results: Dict[str, List[Dict[str, Any]]] = {}
         source_stats: Dict[str, Dict[str, Any]] = {
-            fetcher.name: {"items": 0, "articles": 0, "social": 0, "failed": False}
+            fetcher.name: {
+                "items": 0,
+                "articles": 0,
+                "social": 0,
+                "failed": False,
+                "status": "pending",
+                "empty": False,
+                "skipped": False,
+                "partial": False,
+                "error": None,
+                "skipped_reason": None,
+                "per_feed_errors": {},
+            }
             for fetcher in fetchers
         }
 
@@ -513,7 +560,11 @@ class PipelineFlow:
                         results[fetcher.name] = future.result() or []
                     except Exception as exc:
                         logger.warning("Fetcher %s crashed: %s", fetcher.name, exc)
-                        source_stats[fetcher.name]["failed"] = True
+                        source_stats[fetcher.name].update(
+                            failed=True,
+                            status="failed",
+                            error=f"{type(exc).__name__}: {exc}",
+                        )
                         dead_letter_handler.record_failure(
                             source=fetcher.name,
                             step="ingestion",
@@ -522,6 +573,18 @@ class PipelineFlow:
                             traceback_str=traceback.format_exc(),
                         )
                         results[fetcher.name] = []
+                        continue
+                    health = fetcher.health() if hasattr(fetcher, "health") else {}
+                    source_stats[fetcher.name].update(
+                        status=health.get("status") or "unknown",
+                        failed=bool(health.get("failed")),
+                        empty=bool(health.get("empty")),
+                        skipped=bool(health.get("skipped")),
+                        partial=bool(health.get("partial")),
+                        error=health.get("error"),
+                        skipped_reason=health.get("skipped_reason"),
+                        per_feed_errors=health.get("per_feed_errors") or {},
+                    )
 
         articles: List[Dict[str, Any]] = []
         social: List[Dict[str, Any]] = []
@@ -557,8 +620,9 @@ class PipelineFlow:
             content = _text(raw.get("content"))
             analysis_body = f"{snippet} {content[:1200]}".strip()
             self._enrich_outlet(article)
-            entities = self.entity_extractor.extract(f"{title}. {analysis_body}")
-            title_entities = self.entity_extractor.extract(title)
+            title_entities = self.entity_extractor.extract(title, headline=True)
+            body_entities = self.entity_extractor.extract(analysis_body, headline=False)
+            entities = _merge_entities(title_entities, body_entities)
 
             countries: List[str] = []
             metadata = raw.get("source_metadata") if isinstance(raw.get("source_metadata"), dict) else {}
@@ -571,10 +635,17 @@ class PipelineFlow:
                 value = metadata.get(field)
                 if isinstance(value, str) and source in {"acled", "gdelt_events"}:
                     countries.extend(canonical_countries([value]))
-            countries = list(dict.fromkeys(canonical_countries(entities.get("countries", [])) + countries))
-            for name in countries_in_text(title, snippet, content[:800]):
-                if name not in countries:
-                    countries.append(name)
+            # Headline countries are trusted datelines; body countries are
+            # filtered so an incidental surname ("Jordan") cannot become one.
+            title_countries = canonical_countries(
+                countries_in_text(title, allow_ambiguous=True)
+                + list((title_entities or {}).get("countries") or [])
+            )
+            body_countries = canonical_countries(
+                countries_in_text(snippet, content[:800], allow_ambiguous=False)
+                + list((body_entities or {}).get("countries") or [])
+            )
+            countries = list(dict.fromkeys(countries + title_countries + body_countries))
 
             raw_category = _text(raw.get("category")).lower()
             article["category"] = CATEGORY_MAP.get(raw_category, raw_category) or None
@@ -613,20 +684,27 @@ class PipelineFlow:
             if not title:
                 continue
             snippet = _text(row.get("snippet"))
-            title_entities = self.entity_extractor.extract(title)
-            entities = self.entity_extractor.extract(f"{title}. {snippet}")
+            title_entities = self.entity_extractor.extract(title, headline=True)
+            body_entities = self.entity_extractor.extract(snippet, headline=False)
+            entities = _merge_entities(title_entities, body_entities)
             metadata = row.get("source_metadata") if isinstance(row.get("source_metadata"), dict) else {}
             metadata_countries = metadata.get("countries")
             if isinstance(metadata_countries, str):
                 metadata_countries = [metadata_countries]
-            countries = canonical_countries(entities.get("countries", []) or [])
-            countries = list(dict.fromkeys(countries + canonical_countries(metadata_countries or [])))
+            countries = canonical_countries(metadata_countries or [])
+            countries = list(dict.fromkeys(
+                countries
+                + canonical_countries(countries_in_text(title, allow_ambiguous=True))
+                + canonical_countries(countries_in_text(snippet, allow_ambiguous=False))
+            ))
             row["countries"] = countries[:6]
             geo = self.geocoder.geocode_article(
                 {
                     "lat": row.get("lat"),
                     "lng": row.get("lng"),
                     "location_name": row.get("location_name"),
+                    "title": title,
+                    "snippet": snippet,
                 },
                 entities,
                 title_entities,
@@ -680,7 +758,15 @@ class PipelineFlow:
             key=lambda row: (_article_ts(row) or datetime.min.replace(tzinfo=timezone.utc), _text(row.get("id"))),
             reverse=True,
         )
-        real = real[: max(self.settings.cluster_max_articles, 100)]
+        candidate_limit = max(self.settings.cluster_max_articles, 100)
+        if len(real) > candidate_limit:
+            logger.warning(
+                "Clustering candidate pool truncated: %d available, %d kept. "
+                "Raise CLUSTER_MAX_ARTICLES (and DEDUPE_MINHASH_MAX_ARTICLES) to cover the 30-day volume.",
+                len(real),
+                candidate_limit,
+            )
+            real = real[:candidate_limit]
 
         cutoff = self.now - timedelta(hours=CODED_HISTORY_HOURS)
         coded = [
@@ -712,18 +798,33 @@ class PipelineFlow:
 
         # Coded records already represent one CAMEO event each. Their templated
         # titles cluster spuriously ("X: engaged in fighting"), so keep them apart.
+        # Official feeds (USGS/ACLED/ReliefWeb) also publish authoritative per-
+        # event ids; two distinct ids are never the same story.
         isolated: List[List[Dict[str, Any]]] = []
         for cluster in clusters:
-            real = [article for article in cluster if _text(article.get("source")) not in CODED_SOURCES]
-            coded = [article for article in cluster if _text(article.get("source")) in CODED_SOURCES]
+            real = [
+                article
+                for article in cluster
+                if _text(article.get("source")) not in CODED_SOURCES
+                and _text(article.get("source")) not in OFFICIAL_SOURCES
+            ]
+            singles = [
+                article
+                for article in cluster
+                if _text(article.get("source")) in CODED_SOURCES
+                or _text(article.get("source")) in OFFICIAL_SOURCES
+            ]
             if real:
                 isolated.append(real)
-            isolated.extend([article] for article in coded)
+            isolated.extend([article] for article in singles)
         return isolated
 
     # ------------------------------------------------------------------- gold
     def _read_event_cache(self) -> Dict[str, Dict[str, Any]]:
-        rows = self.store.read("gold", "events", since_days=2)
+        # Read the full 30-day window, not just two days: windows must be able
+        # to merge history that silver no longer holds, and replay frames need
+        # their event rows.
+        rows = self.store.read("gold", "events", since_days=30)
         cache: Dict[str, Dict[str, Any]] = {}
         for row in rows:
             _sanitise_row(row)
@@ -733,7 +834,7 @@ class PipelineFlow:
         return cache
 
     def _read_detail_cache(self) -> Dict[str, Dict[str, Any]]:
-        rows = self.store.read("gold", "event_details", since_days=2)
+        rows = self.store.read("gold", "event_details", since_days=30)
         cache: Dict[str, Dict[str, Any]] = {}
         for row in rows:
             _sanitise_row(row)
@@ -742,7 +843,98 @@ class PipelineFlow:
                 cache[key] = row
         return cache
 
-    def _event_id(self, cluster: List[Dict[str, Any]]) -> str:
+    def _existing_replay_ids(self) -> set:
+        path = self.serving_dir / "rewind.json"
+        if not path.exists():
+            return set()
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return set()
+        return {
+            str(event.get("id"))
+            for frame in payload.get("frames") or []
+            for event in frame.get("events") or []
+            if isinstance(event, dict) and event.get("id")
+        }
+
+    def _merge_replay_details(
+        self,
+        details: Dict[str, Dict[str, Any]],
+        replay: Optional[Dict[str, Any]],
+        previous_details: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Dict[str, Any]]:
+        """Ensure every replay frame id has a detail row."""
+        if not replay:
+            return details
+        merged = dict(details)
+        for frame in replay.get("frames") or []:
+            for event in frame.get("events") or []:
+                event_id = _text(event.get("id")) if isinstance(event, dict) else ""
+                if not event_id or event_id in merged:
+                    continue
+                previous = previous_details.get(event_id)
+                if isinstance(previous, dict):
+                    detail = dict(_sanitise_row(previous))
+                    detail["id"] = event_id
+                    detail.setdefault("revision", 1)
+                    merged[event_id] = detail
+        return merged
+
+    def _previous_event_index(self, previous_details: Dict[str, Dict[str, Any]]) -> Dict[tuple, str]:
+        """Index previous details by source URL and title+outlet.
+
+        Reusing an existing id when the same source URL/title already has a
+        detail keeps /v1/events links and replay frames stable across runs.
+        """
+        index: Dict[tuple, str] = {}
+        for event_id, detail in (previous_details or {}).items():
+            if not _text(event_id):
+                continue
+            for source in detail.get("sources") or []:
+                if not isinstance(source, dict):
+                    continue
+                url = canonicalize_url(_text(source.get("url")))
+                if url:
+                    index.setdefault(("url", url.lower()), event_id)
+                title = _normalise_text(_text(source.get("title")))
+                outlet = _text(source.get("outlet_name") or source.get("outlet")).lower()
+                if title:
+                    index.setdefault(("title", title, outlet), event_id)
+            title = _normalise_text(_text(detail.get("title")))
+            outlet = _text(detail.get("source") or detail.get("outlet")).lower()
+            if title:
+                index.setdefault(("title", title, outlet), event_id)
+        return index
+
+    def _matched_event_id(
+        self,
+        article: Dict[str, Any],
+        previous_index: Optional[Dict[tuple, str]],
+        avoid: Optional[set] = None,
+    ) -> Optional[str]:
+        if not previous_index:
+            return None
+        candidates = []
+        url = canonicalize_url(_text(article.get("canonical_url")) or _text(article.get("url")))
+        if url:
+            candidates.append(("url", url.lower()))
+        title = _normalise_text(_text(article.get("title")))
+        outlet = _outlet(article).lower()
+        if title:
+            candidates.append(("title", title, outlet))
+        for key in candidates:
+            event_id = previous_index.get(key)
+            if event_id and (not avoid or event_id not in avoid):
+                return event_id
+        return None
+
+    def _event_id(
+        self,
+        cluster: List[Dict[str, Any]],
+        previous_index: Optional[Dict[tuple, str]] = None,
+        avoid: Optional[set] = None,
+    ) -> str:
         ordered = sorted(
             cluster,
             key=lambda article: (
@@ -750,12 +942,29 @@ class PipelineFlow:
                 _text(article.get("id")),
             ),
         )
+        # Official feeds publish authoritative event ids. Deriving the event id
+        # from them makes USGS/ACLED/ReliefWeb ids stable and distinct.
+        for article in ordered:
+            source = _text(article.get("source"))
+            if source in OFFICIAL_SOURCES or source in CODED_SOURCES:
+                source_id = _text(article.get("source_id")) or _text(article.get("id"))
+                if source_id:
+                    return "evt-" + stable_id("event", source, source_id)[:20]
+        # Reuse an existing id when the same URL/title already has a detail.
+        for article in ordered:
+            matched = self._matched_event_id(article, previous_index, avoid)
+            if matched:
+                return matched
         for article in ordered:
             if _text(article.get("source")) not in CODED_SOURCES and _text(article.get("id")):
-                return "evt-" + stable_id("event", article.get("id"))[:20]
+                candidate = "evt-" + stable_id("event", article.get("id"))[:20]
+                if not avoid or candidate not in avoid:
+                    return candidate
         if ordered and _text(ordered[0].get("id")):
-            return "evt-" + stable_id("event", ordered[0].get("id"))[:20]
-        return "evt-" + stable_id("event", self.run_id)[:20]
+            candidate = "evt-" + stable_id("event", ordered[0].get("id"))[:20]
+            if not avoid or candidate not in avoid:
+                return candidate
+        return "evt-" + stable_id("event", self.run_id, _text(ordered[0].get("id")) if ordered else "")[:20]
 
     def _primary_article(self, cluster: List[Dict[str, Any]]) -> Dict[str, Any]:
         ordered = sorted(
@@ -860,6 +1069,7 @@ class PipelineFlow:
         clusters: List[List[Dict[str, Any]]],
         social_items: List[Dict[str, Any]],
         previous_events: Dict[str, Dict[str, Any]],
+        previous_index: Optional[Dict[tuple, str]] = None,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
         events: List[Dict[str, Any]] = []
         contexts: Dict[str, Dict[str, Any]] = {}
@@ -884,7 +1094,7 @@ class PipelineFlow:
             snippet = _text(primary.get("snippet"))
             content = _text(primary.get("content"))
             analysis_body = snippet if len(snippet) >= 200 else f"{snippet} {content[:800]}".strip()
-            event_id = self._event_id(cluster)
+            event_id = self._event_id(cluster, previous_index, avoid=set(contexts))
             if event_id in contexts:
                 continue
 
@@ -978,6 +1188,81 @@ class PipelineFlow:
         )
         return events, contexts
 
+    def _merge_historical_events(
+        self,
+        events: List[Dict[str, Any]],
+        contexts: Dict[str, Dict[str, Any]],
+        previous_events: Dict[str, Dict[str, Any]],
+        previous_details: Dict[str, Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Add still-relevant gold events that silver history no longer holds.
+
+        This is what keeps 7d/30d honest when the pull window is short: other
+        windows may show whatever history genuinely exists, and the span fields
+        disclose when that is less than requested.
+        """
+        cutoff = self.now - timedelta(days=30)
+        current_ids = {event.get("id") for event in events}
+        current_titles = {
+            (_normalise_text(_text(event.get("t"))), _text(event.get("src")).lower())
+            for event in events
+        }
+        merged = list(events)
+        for event_id, row in previous_events.items():
+            if not event_id or event_id in current_ids or event_id in contexts:
+                continue
+            _sanitise_row(row)
+            if _text(row.get("src")) == CODED_SOURCE_LABEL:
+                continue
+            lat, lng = _number(row.get("lat")), _number(row.get("lng"))
+            if lat is None or lng is None:
+                continue
+            stamp = _parse_iso(row.get("at") or row.get("last_updated"))
+            if not stamp or stamp < cutoff or stamp > self.now + timedelta(hours=1):
+                continue
+            title_key = (
+                _normalise_text(_text(row.get("t") or row.get("title"))),
+                _text(row.get("src")).lower(),
+            )
+            if title_key in current_titles:
+                continue
+            event = {
+                "id": event_id,
+                "lat": round(lat, 4),
+                "lng": round(lng, 4),
+                "cat": _text(row.get("cat") or row.get("category")) or "other",
+                "imp": _number(row.get("imp") or row.get("importance")) or 0.0,
+                "t": _text(row.get("t") or row.get("title"))[:160],
+                "at": stamp.isoformat(),
+                "oc": int(_number(row.get("oc")) or 0),
+                "sp": row.get("sp") or row.get("spectrum") or {},
+                "st": _text(row.get("st") or row.get("status")) or "ongoing",
+                "sb": _number(row.get("sb")) or 0.0,
+                "ss": bool(row.get("ss")),
+                "cg": bool(row.get("cg")),
+                "cw": bool(row.get("cw")),
+                "sum": _text(row.get("sum") or row.get("summary")),
+                "loc": _text(row.get("loc") or row.get("location_name"))[:120],
+                "gp": _text(row.get("gp") or row.get("geo_precision")),
+                "src": _text(row.get("src"))[:80],
+                "article_count": int(_number(row.get("article_count")) or 0),
+                "source_count": int(_number(row.get("source_count")) or 0),
+            }
+            merged.append(event)
+            current_ids.add(event_id)
+            contexts[event_id] = {
+                "historical": True,
+                "event": event,
+                "previous_detail": previous_details.get(event_id),
+                "countries": row.get("countries") or [],
+            }
+        if len(merged) > len(events):
+            logger.info(
+                "Merged %d historical gold events into the 30-day snapshot pool",
+                len(merged) - len(events),
+            )
+        return merged
+
     # -------------------------------------------------------------- snapshots
     def _snapshot_cap(self, window: str) -> int:
         base = max(self.settings.max_snapshot_events, 20)
@@ -987,45 +1272,64 @@ class PipelineFlow:
             return max(self.settings.max_snapshot_events_30d, base)
         return base
 
-    def _window_events(self, events: List[Dict[str, Any]], window: str) -> Tuple[List[Dict[str, Any]], int]:
-        minutes = WINDOWS.get(window)
-        if minutes is None:
-            return [], 0
-        cutoff = self.now - timedelta(minutes=minutes)
-        selected = []
-        for event in events:
-            if event.get("lat") is None or event.get("lng") is None:
-                continue
-            # CAMEO rows are machine-coded conflict signals, not editorial
-            # stories. They remain in the lake for relations and analysis but
-            # must not crowd real reporting out of the public snapshots.
-            if _text(event.get("src")) == CODED_SOURCE_LABEL:
-                continue
-            stamp = _parse_iso(event.get("at"))
-            if stamp and stamp >= cutoff:
-                selected.append(event)
-        selected.sort(key=lambda event: (event.get("imp", 0.0), event.get("at") or ""), reverse=True)
-        total = len(selected)
-        return selected[: self._snapshot_cap(window)], total
+    def _window_events(
+        self,
+        events: List[Dict[str, Any]],
+        window: str,
+        required_ids: Optional[Iterable[str]] = None,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        # CAMEO rows are machine-coded conflict signals, not editorial stories.
+        # They remain in the lake for relations and analysis but must not crowd
+        # real reporting out of the public snapshots.
+        selected, total, _ = select_window_events(
+            events,
+            self.now,
+            window,
+            self._snapshot_cap(window),
+            required_ids=required_ids,
+            coded_label=CODED_SOURCE_LABEL,
+        )
+        return selected, total
 
     def _build_snapshots(
         self, events: List[Dict[str, Any]], arcs: List[Dict[str, Any]]
     ) -> Dict[str, Dict[str, Any]]:
         snapshots: Dict[str, Dict[str, Any]] = {}
+        required_ids: List[str] = []
         for window in WINDOW_NAMES:
-            selected, total_available = self._window_events(events, window)
+            selected, total_available, meta = select_window_events(
+                events,
+                self.now,
+                window,
+                self._snapshot_cap(window),
+                required_ids=required_ids,
+                coded_label=CODED_SOURCE_LABEL,
+            )
             if not selected:
                 previous = SnapshotGenerator.read_existing(self.serving_dir, window)
                 if previous and previous.get("events"):
                     logger.warning("No %s events this run; keeping previous %s snapshot.", window, window)
                     snapshots[window] = previous
                     continue
+            # Carry every narrower-window id into the next window. This is the
+            # invariant that previously failed when a 7d cap of 600 dropped 48
+            # of the 400 ids shown in 24h.
+            required_ids = [str(event.get("id")) for event in selected if event.get("id")]
             snapshots[window] = self.snapshot_gen.generate(
                 selected,
                 arcs,
                 window_name=window,
                 generated_at=self.now.isoformat(),
                 total_events=total_available,
+                window_meta=meta,
+            )
+            logger.info(
+                "Snapshot %s: %d shown of %d available, span %.1fh (complete=%s)",
+                window,
+                len(selected),
+                total_available,
+                float(meta.get("span_hours") or 0.0),
+                meta.get("span_complete"),
             )
         return snapshots
 
@@ -1133,6 +1437,7 @@ class PipelineFlow:
         reps = sorted(
             representative_articles(cluster),
             key=lambda article: (
+                not bool(article.get("via_google_news") or _text(article.get("source")) == "google_news"),
                 _text(article.get("source")) not in CODED_SOURCES,
                 _article_ts(article) or datetime.min.replace(tzinfo=timezone.utc),
             ),
@@ -1140,14 +1445,21 @@ class PipelineFlow:
         )
         sources: List[Dict[str, Any]] = []
         seen: set = set()
+        seen_title_outlet: set = set()
         for article in reps:
             url = _text(article.get("canonical_url")) or _text(article.get("url"))
             if not url or url.lower() in seen:
                 continue
-            seen.add(url.lower())
             title = _text(article.get("title"))
+            outlet_key = _outlet(article).strip().lower()
+            title_outlet = (_normalise_text(title), outlet_key)
+            if title_outlet in seen_title_outlet:
+                continue
+            seen_title_outlet.add(title_outlet)
+            seen.add(url.lower())
             snippet = self._article_excerpt(article)
             published = _article_ts(article)
+            metadata = article.get("source_metadata") if isinstance(article.get("source_metadata"), dict) else {}
             sources.append(
                 {
                     "outlet_name": _outlet(article),
@@ -1156,6 +1468,11 @@ class PipelineFlow:
                     "title": title[:200],
                     "snippet": snippet[:280],
                     "published_at": published.isoformat() if published else None,
+                    "via_google_news": bool(
+                        article.get("via_google_news")
+                        or _text(article.get("source")) == "google_news"
+                        or metadata.get("via_google_news")
+                    ),
                 }
             )
             if len(sources) >= 12:
@@ -1174,6 +1491,8 @@ class PipelineFlow:
 
         geo = context["geo"] or {}
         location_name = geo.get("name") or (context["countries"][0] if context["countries"] else "")
+        sources = self._sources(cluster)
+        source_total = max(int(context["coverage"]["source_count"] or 0), len(sources))
         return {
             "id": event["id"],
             "title": context["title"],
@@ -1188,7 +1507,10 @@ class PipelineFlow:
             "excerpt": self._excerpt(cluster),
             "timeline": self._timeline(cluster),
             "coverage": self._coverage_detail(cluster),
-            "sources": self._sources(cluster),
+            "sources": sources,
+            "sources_total": source_total,
+            "sources_shown": len(sources),
+            "sources_sampled": len(sources) < source_total,
             "corrections": corrections,
             "revision": revision,
             "lat": event.get("lat"),
@@ -1211,6 +1533,48 @@ class PipelineFlow:
             "source_sig": context["summary"]["source_sig"],
         }
 
+    def _historical_detail(self, event_id: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        event = context.get("event") or {}
+        stamp = _text(event.get("at"))
+        return {
+            "id": event_id,
+            "title": _text(event.get("t")),
+            "status": _text(event.get("st")) or "ongoing",
+            "category": _text(event.get("cat")) or "other",
+            "severity": "low",
+            "first_reported": stamp,
+            "last_updated": stamp,
+            "summary": _text(event.get("sum")),
+            "summary_method": "cached",
+            "confidence": 0.5,
+            "excerpt": "",
+            "timeline": [],
+            "coverage": [],
+            "sources": [],
+            "corrections": [],
+            "revision": 1,
+            "lat": event.get("lat"),
+            "lng": event.get("lng"),
+            "geo_precision": _text(event.get("gp")),
+            "location_name": _text(event.get("loc")),
+            "reddit_threads": 0,
+            "bluesky_posts": 0,
+            "outlet_count": int(event.get("oc") or 0),
+            "article_count": int(event.get("article_count") or 0),
+            "source_count": int(event.get("source_count") or 0),
+            "sources_total": int(event.get("source_count") or 0),
+            "sources_shown": 0,
+            "is_single_source": bool(event.get("ss")),
+            "has_coverage_gap": bool(event.get("cg")),
+            "has_official_source": False,
+            "content_warning": None,
+            "related_event_ids": [],
+            "related_relation_ids": [],
+            "countries": list(context.get("countries") or []),
+            "spectrum": event.get("sp") or {},
+            "source_sig": "",
+        }
+
     def _build_details(
         self,
         wanted_ids: Iterable[str],
@@ -1218,10 +1582,36 @@ class PipelineFlow:
         previous_details: Dict[str, Dict[str, Any]],
         arcs: List[Dict[str, Any]],
     ) -> Dict[str, Dict[str, Any]]:
-        wanted = [event_id for event_id in wanted_ids if event_id in contexts]
+        wanted = [
+            event_id
+            for event_id in wanted_ids
+            if event_id in contexts or event_id in previous_details
+        ]
         details: Dict[str, Dict[str, Any]] = {}
         for event_id in wanted:
+            if event_id not in contexts:
+                detail = dict(_sanitise_row(previous_details[event_id]))
+                detail["id"] = event_id
+                detail.setdefault("revision", 1)
+                detail.setdefault("corrections", [])
+                detail.setdefault("related_event_ids", [])
+                detail.setdefault("related_relation_ids", [])
+                details[event_id] = detail
+                continue
             context = contexts[event_id]
+            if context.get("historical"):
+                detail = context.get("previous_detail")
+                if isinstance(detail, dict):
+                    detail = dict(_sanitise_row(detail))
+                else:
+                    detail = self._historical_detail(event_id, context)
+                detail["id"] = event_id
+                detail.setdefault("revision", 1)
+                detail.setdefault("corrections", [])
+                detail.setdefault("related_event_ids", [])
+                detail.setdefault("related_relation_ids", [])
+                details[event_id] = detail
+                continue
             event = {
                 "id": event_id,
                 "lat": (context["geo"] or {}).get("lat"),
@@ -1233,12 +1623,21 @@ class PipelineFlow:
         # Related events: two or more shared canonical countries.
         index: Dict[str, List[str]] = defaultdict(list)
         for event_id in wanted:
-            for country in contexts[event_id]["countries"]:
+            countries = (
+                contexts.get(event_id, {}).get("countries")
+                or details.get(event_id, {}).get("countries")
+                or []
+            )
+            for country in countries:
                 if len(index[country]) < 400:
                     index[country].append(event_id)
         for event_id in wanted:
             scores: Counter = Counter()
-            for country in contexts[event_id]["countries"]:
+            for country in (
+                contexts.get(event_id, {}).get("countries")
+                or details.get(event_id, {}).get("countries")
+                or []
+            ):
                 for other in index.get(country, []):
                     if other != event_id:
                         scores[other] += 1
@@ -1262,6 +1661,22 @@ class PipelineFlow:
             if event["id"] not in wanted or event["id"] not in contexts:
                 continue
             context = contexts[event["id"]]
+            if context.get("historical"):
+                row = dict(event)
+                row.update(
+                    {
+                        "event_id": event["id"],
+                        "title": _text(event.get("t")),
+                        "status": _text(event.get("st")),
+                        "category": _text(event.get("cat")),
+                        "importance": event.get("imp"),
+                        "location_name": event.get("loc"),
+                        "geo_precision": event.get("gp"),
+                        "countries": context.get("countries") or [],
+                    }
+                )
+                rows.append(row)
+                continue
             row = dict(event)
             row.update(
                 {
@@ -1365,6 +1780,15 @@ class PipelineFlow:
                     window: {
                         "events": snapshot.get("n", {}).get("e", 0),
                         "arcs": snapshot.get("n", {}).get("a", 0),
+                        "total_available": snapshot.get("n", {}).get("available")
+                        if snapshot.get("n", {}).get("available") is not None
+                        else snapshot.get("n", {}).get("total"),
+                        "span_hours": snapshot.get("n", {}).get("span_hours"),
+                        "available_from": snapshot.get("n", {}).get("available_from"),
+                        "available_to": snapshot.get("n", {}).get("available_to"),
+                        "span_complete": snapshot.get("n", {}).get("span_complete"),
+                        "total_scope": snapshot.get("n", {}).get("total_scope"),
+                        "top_n": True,
                         "generated_at": snapshot.get("ts"),
                     }
                     for window, snapshot in snapshots.items()
@@ -1378,8 +1802,13 @@ class PipelineFlow:
                     ),
                 },
                 "sources": source_stats,
+                "source_health": {
+                    status: sum(1 for stats in source_stats.values() if stats.get("status") == status)
+                    for status in ("ok", "partial", "empty", "skipped", "failed")
+                },
                 "hf_pull": pull_counts,
                 "quality": quality,
+                "serving": self._serving_checksums(),
                 "replay": {
                     "frames": len(replay.get("frames") or []) if replay else 0,
                     "available_runs": replay.get("available_runs", 0) if replay else 0,
@@ -1392,6 +1821,35 @@ class PipelineFlow:
             }
         )
         self._write_json("manifest.json", manifest)
+
+    def _serving_checksums(self) -> Dict[str, Any]:
+        """Checksums let the API/operator verify the serving set as a unit."""
+        names = [
+            "world_1h.json",
+            "world_24h.json",
+            "world_7d.json",
+            "world_30d.json",
+            "event_details.json",
+            "rewind.json",
+            "search_index.sqlite3",
+        ]
+        files: Dict[str, str] = {}
+        for name in names:
+            path = self.serving_dir / name
+            if not path.is_file():
+                continue
+            digest = hashlib.sha256()
+            try:
+                with path.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        digest.update(chunk)
+            except OSError:
+                continue
+            files[name] = digest.hexdigest()
+        combined = hashlib.sha256(
+            "|".join(f"{name}:{digest}" for name, digest in sorted(files.items())).encode("utf-8")
+        ).hexdigest()
+        return {"run_id": self.run_id, "files": files, "digest": combined}
 
     def _write_json(self, filename: str, payload: Any) -> None:
         target = self.serving_dir / filename

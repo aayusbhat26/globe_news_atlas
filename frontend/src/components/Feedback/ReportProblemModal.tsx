@@ -51,17 +51,27 @@ export const ReportProblemModal: React.FC<ReportProblemModalProps> = ({
   };
 
   return (
-    <div className="report-modal-backdrop" onClick={onClose} role="dialog" aria-modal="true" aria-label={t('report_problem')}>
-      <div ref={modalRef} className="report-modal" tabIndex={-1} onClick={(e) => e.stopPropagation()}>
+    <div className="report-modal-backdrop" onClick={onClose} role="presentation">
+      <div
+        ref={modalRef}
+        className="report-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="report-modal-title"
+        tabIndex={-1}
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="report-modal__header">
-          <h3 className="report-modal__title">{t('report_problem')}</h3>
+          <h3 className="report-modal__title" id="report-modal-title">
+            {t('report_problem')}
+          </h3>
           <button type="button" data-autofocus className="report-modal__close" onClick={onClose} aria-label={t('close')}>
             <X size={18} />
           </button>
         </div>
 
         {submitted ? (
-          <div className="report-modal__success">
+          <div className="report-modal__success" role="status">
             <CheckCircle2 size={36} color="var(--accent-emerald)" />
             <p style={{ fontWeight: 600, marginTop: 8 }}>{t('report_recorded')}</p>
           </div>
@@ -94,7 +104,11 @@ export const ReportProblemModal: React.FC<ReportProblemModalProps> = ({
               />
             </label>
 
-            {error && <p className="report-modal__error">{error}</p>}
+            {error && (
+              <p className="report-modal__error" role="alert" aria-live="assertive">
+                {error}
+              </p>
+            )}
 
             <div className="report-modal__actions">
               <button type="button" className="btn-secondary" onClick={onClose} disabled={submitting}>

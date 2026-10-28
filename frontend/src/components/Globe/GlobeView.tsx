@@ -18,7 +18,10 @@ interface GlobeViewProps {
   targetCoords?: { lat: number; lng: number; altitude?: number } | null;
   isDark: boolean;
   onWebGLError?: () => void;
+  onWebGLRestored?: () => void;
   legendInitiallyOpen?: boolean;
+  /** Pixels of fixed Atlas chrome above the canvas. */
+  insetTop?: number;
 }
 
 type GroupedEvent = SnapshotEvent & {
@@ -179,7 +182,7 @@ function buildGeoLabel(
   handlers: React.MutableRefObject<GlobeHandlers>,
   activeCountry: string | null | undefined,
 ): HTMLElement {
-  if (label.level === 'country') {
+  if (label.level === 'country' && handlers.current.onCountryClick) {
     const active = Boolean(activeCountry) && label.name === activeCountry;
     const button = document.createElement('button');
     button.type = 'button';
@@ -206,6 +209,7 @@ function buildGeoLabel(
 
   const span = document.createElement('span');
   span.className = `geo-label geo-label--${label.level}`;
+  if (label.level === 'country') span.classList.add('geo-label--static');
   span.textContent = label.name;
   span.title = label.admin ? `${label.name} · ${label.admin}` : label.name;
   span.setAttribute('aria-hidden', 'true');
@@ -286,17 +290,42 @@ const GlobeViewComponent: React.FC<GlobeViewProps> = ({
   targetCoords,
   isDark,
   onWebGLError,
+  onWebGLRestored,
   legendInitiallyOpen,
+  insetTop = 0,
 }) => {
   const { t } = useTranslation();
   const containerRef = useRef<HTMLDivElement>(null);
   const globeRef = useRef<any>(null);
   const boundaryTextureSize = useMemo(() => pickBoundaryTextureSize(), []);
-  const [legendOpen, setLegendOpen] = useState<boolean>(
-    () =>
-      legendInitiallyOpen ??
-      (typeof window === 'undefined' || !window.matchMedia('(max-width: 720px)').matches),
-  );
+  const [legendOpen, setLegendOpen] = useState<boolean>(() => {
+    if (legendInitiallyOpen === true) return true;
+    if (legendInitiallyOpen === false) return false;
+    try {
+      // Collapsed on a first visit; a previous dismissal is remembered.
+      return localStorage.getItem('gna_map_key_open') === '0';
+    } catch {
+      return false;
+    }
+  });
+
+  const openLegend = () => {
+    setLegendOpen(true);
+    try {
+      localStorage.setItem('gna_map_key_open', '0');
+    } catch {
+      /* storage may be unavailable */
+    }
+  };
+
+  const closeLegend = () => {
+    setLegendOpen(false);
+    try {
+      localStorage.setItem('gna_map_key_open', '1');
+    } catch {
+      /* storage may be unavailable */
+    }
+  };
 
   const initialView = useMemo(() => {
     const params = new URLSearchParams(window.location.search);
@@ -335,10 +364,15 @@ const GlobeViewComponent: React.FC<GlobeViewProps> = ({
     onCountryClick,
   });
   const errorHandlerRef = useRef(onWebGLError);
+  const restoredHandlerRef = useRef(onWebGLRestored);
 
   useEffect(() => {
     errorHandlerRef.current = onWebGLError;
   }, [onWebGLError]);
+
+  useEffect(() => {
+    restoredHandlerRef.current = onWebGLRestored;
+  }, [onWebGLRestored]);
 
   useEffect(() => {
     handlersRef.current = { onEventHover, onEventClick, onLocationClick, onCountryClick };
@@ -466,12 +500,36 @@ const GlobeViewComponent: React.FC<GlobeViewProps> = ({
     let arcVisibilityHandler: (() => void) | null = null;
     let viewUpdateHandler: (() => void) | null = null;
     let viewTimer: number | undefined;
+    let contextCanvas: HTMLCanvasElement | null = null;
+    let resizeObserver: ResizeObserver | null = null;
+
+    const handleContextLost = (event: Event) => {
+      event.preventDefault();
+      errorHandlerRef.current?.();
+    };
+    const handleContextRestored = () => {
+      restoredHandlerRef.current?.();
+    };
+    const applySize = () => {
+      const container = containerRef.current;
+      if (!globe || !container) return;
+      const width = container.clientWidth;
+      const height = container.clientHeight;
+      if (width > 0 && height > 0) {
+        globe.width(width);
+        globe.height(height);
+      }
+    };
 
     try {
       const renderer = globe.renderer?.();
       if (renderer) {
         renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+        contextCanvas = renderer.domElement as HTMLCanvasElement;
+        contextCanvas.addEventListener('webglcontextlost', handleContextLost, false);
+        contextCanvas.addEventListener('webglcontextrestored', handleContextRestored, false);
       }
+      applySize();
 
       const validArcs = (items: SnapshotArc[]) =>
         items.filter((arc) => arc.a_lat !== undefined && arc.b_lat !== undefined);
@@ -564,17 +622,25 @@ const GlobeViewComponent: React.FC<GlobeViewProps> = ({
       return;
     }
 
-    const handleResize = () => {
-      if (globeRef.current && containerRef.current) {
-        globeRef.current.width(window.innerWidth);
-        globeRef.current.height(window.innerHeight);
-      }
-    };
-
-    window.addEventListener('resize', handleResize);
+    // Size from the panel, not window.innerWidth/Height: Rewind's 62vh globe
+    // and mobile orientation changes need the container's real dimensions.
+    if (typeof ResizeObserver !== 'undefined') {
+      resizeObserver = new ResizeObserver(applySize);
+      resizeObserver.observe(container);
+    } else {
+      window.addEventListener('resize', applySize);
+    }
+    window.addEventListener('orientationchange', applySize);
+    applySize();
 
     return () => {
-      window.removeEventListener('resize', handleResize);
+      resizeObserver?.disconnect();
+      window.removeEventListener('resize', applySize);
+      window.removeEventListener('orientationchange', applySize);
+      if (contextCanvas) {
+        contextCanvas.removeEventListener('webglcontextlost', handleContextLost);
+        contextCanvas.removeEventListener('webglcontextrestored', handleContextRestored);
+      }
       if (viewTimer) window.clearTimeout(viewTimer);
       if (controls && arcVisibilityHandler) {
         controls.removeEventListener('change', arcVisibilityHandler);
@@ -647,7 +713,10 @@ const GlobeViewComponent: React.FC<GlobeViewProps> = ({
   const categories = Object.entries(isDark ? CATEGORY_COLORS : CATEGORY_COLORS_LIGHT);
 
   return (
-    <div className="globe-container">
+    <div
+      className="globe-container"
+      style={insetTop ? ({ '--globe-inset-top': `${insetTop}px` } as React.CSSProperties) : undefined}
+    >
       <div ref={containerRef} className="globe-canvas-wrapper" />
 
       {legendOpen ? (
@@ -657,7 +726,7 @@ const GlobeViewComponent: React.FC<GlobeViewProps> = ({
             <button
               type="button"
               className="globe-legend__close"
-              onClick={() => setLegendOpen(false)}
+              onClick={closeLegend}
               aria-label={t('hide_map_key')}
             >
               <X size={12} />
@@ -716,7 +785,7 @@ const GlobeViewComponent: React.FC<GlobeViewProps> = ({
         <button
           type="button"
           className="globe-legend-toggle"
-          onClick={() => setLegendOpen(true)}
+          onClick={openLegend}
           aria-expanded="false"
         >
           {t('map_key')}

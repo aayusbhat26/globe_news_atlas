@@ -8,7 +8,7 @@ import {
   fetchWatchlineEntries,
   removeWatchlineEntry,
 } from '../../services/atlas';
-import { ApiError } from '../../services/api';
+import { ApiError, isAbortError } from '../../services/api';
 import { formatRelativeTime } from '../../utils/time';
 import { navigate } from '../../router';
 import type { Storyline, StorylinesResponse, WatchlineEntry } from '../../types/atlas';
@@ -42,20 +42,38 @@ export const StorylinesPage: React.FC = () => {
   const [data, setData] = useState<StorylinesResponse | null>(null);
   const [entries, setEntries] = useState<WatchlineEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [reloadToken, setReloadToken] = useState(0);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
   useEffect(() => {
-    setLoading(true);
+    const controller = new AbortController();
+    let active = true;
+    setLoading(!data);
+    setRefreshing(Boolean(data));
     setError(null);
-    fetchStorylines(timeWindow)
-      .then(setData)
+    fetchStorylines(timeWindow, controller.signal)
+      .then((result) => {
+        if (active) setData(result);
+      })
       .catch((err: unknown) => {
+        if (!active || isAbortError(err)) return;
         setError(err instanceof Error ? err.message : 'Could not load storylines.');
       })
-      .finally(() => setLoading(false));
-  }, [timeWindow]);
+      .finally(() => {
+        if (!active) return;
+        setLoading(false);
+        setRefreshing(false);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+    // `data` is read only to distinguish a first load from a window refresh.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [timeWindow, reloadToken]);
 
   useEffect(() => {
     if (!auth.user) return;
@@ -121,19 +139,26 @@ export const StorylinesPage: React.FC = () => {
         </>
       }
       actions={
-        <div className="page-windows" role="group" aria-label="Time window">
-          {WINDOWS.map((value) => (
-            <button
-              key={value}
-              type="button"
-              className={timeWindow === value ? 'is-active' : ''}
-              aria-pressed={timeWindow === value}
-              onClick={() => setTimeWindow(value)}
-            >
-              {value}
-            </button>
-          ))}
-        </div>
+        <>
+          <div className="page-windows" role="group" aria-label="Time window">
+            {WINDOWS.map((value) => (
+              <button
+                key={value}
+                type="button"
+                className={timeWindow === value ? 'is-active' : ''}
+                aria-pressed={timeWindow === value}
+                onClick={() => setTimeWindow(value)}
+              >
+                {value}
+              </button>
+            ))}
+          </div>
+          {refreshing && (
+            <span className="page-refreshing" role="status">
+              Refreshing…
+            </span>
+          )}
+        </>
       }
     >
       <div className="storyline-filters" role="group" aria-label="Relation type">
@@ -162,6 +187,26 @@ export const StorylinesPage: React.FC = () => {
         <div className="page-error" role="alert">
           <h2>Storylines could not be read.</h2>
           <p>{error}</p>
+          <button
+            type="button"
+            className="page-secondary"
+            onClick={() => setReloadToken((token) => token + 1)}
+          >
+            Try again
+          </button>
+        </div>
+      ) : data?.available === false ? (
+        <div className="page-empty" role="status">
+          <Waypoints size={22} aria-hidden="true" />
+          <h2>The relations desk is temporarily unavailable.</h2>
+          <p>The snapshot exists, but its storyline extract is not ready yet.</p>
+          <button
+            type="button"
+            className="page-secondary"
+            onClick={() => setReloadToken((token) => token + 1)}
+          >
+            Try again
+          </button>
         </div>
       ) : storylines.length === 0 ? (
         <div className="page-empty">

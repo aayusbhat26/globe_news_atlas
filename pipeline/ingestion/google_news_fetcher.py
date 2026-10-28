@@ -8,7 +8,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import parse_qs, quote_plus, urlparse
 
 import requests
 
@@ -62,6 +62,92 @@ class GoogleNewsFetcher(BaseFetcher):
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": USER_AGENT, "Accept": "application/rss+xml, */*"})
 
+    @staticmethod
+    def publisher_url(link: str) -> Tuple[str, bool]:
+        """Return (publisher_url, resolved).
+
+        Google News RSS links are usually opaque ``news.google.com`` redirects.
+        When an explicit ``url=`` parameter is present we can use the publisher
+        URL; otherwise the record stays on the aggregator and is marked
+        ``via_google_news`` so the UI and counts are honest.
+        """
+        if not link:
+            return "", False
+        parsed = urlparse(link)
+        if parsed.netloc.lower() not in {"news.google.com", "www.news.google.com"}:
+            return link, True
+        query = parse_qs(parsed.query)
+        for key in ("url", "q"):
+            candidate = (query.get(key) or [""])[0]
+            if candidate.startswith(("http://", "https://")):
+                return candidate, True
+        return link, False
+
+    def _record_for_entry(
+        self,
+        entry: Any,
+        query: str,
+        edition: str,
+        language: str,
+    ) -> Dict[str, Any] | None:
+        title = clean_text(entry.get("title", ""), 400)
+        link = (entry.get("link") or "").strip()
+        if not title or not link:
+            return None
+        outlet = ""
+        outlet_href = ""
+        source = entry.get("source")
+        if source:
+            outlet = clean_text(source.get("title", ""), 120)
+            outlet_href = source.get("href", "")
+        clean_title = title
+        if " - " in title:
+            head, suffix = title.rsplit(" - ", 1)
+            if suffix and (not outlet or suffix.lower() == outlet.lower()):
+                clean_title = head
+                outlet = suffix
+        published = entry.get("published") or entry.get("updated")
+        if not published:
+            parsed = entry.get("published_parsed")
+            if parsed:
+                published = datetime(*parsed[:6], tzinfo=timezone.utc).isoformat()
+
+        resolved_url, resolved = self.publisher_url(link)
+        record = make_raw_article(
+            source="google_news",
+            source_id=resolved_url if resolved else link,
+            title=clean_title,
+            url=resolved_url,
+            outlet=outlet,
+            domain=(
+                urlparse(resolved_url).netloc
+                if resolved
+                else (urlparse(outlet_href).netloc if outlet_href else "")
+            ),
+            alignment="unrated",
+            country=None,
+            language=language.lower(),
+            published_at=published,
+            snippet=entry.get("summary", ""),
+            category=None,
+            source_metadata={
+                "query": query,
+                "edition": edition,
+                "aggregator": "google_news",
+                "outlet_href": outlet_href,
+                "via_google_news": not resolved,
+                "google_news_url": link if not resolved else "",
+            },
+            raw_payload={
+                "title": title,
+                "link": link,
+                "resolved_url": resolved_url if resolved else "",
+                "published": published,
+            },
+        )
+        record["via_google_news"] = not resolved
+        return record
+
     def _fetch_query(self, item: Tuple[str, str, str]) -> List[Dict[str, Any]]:
         query, edition, language = item
         url = (
@@ -73,64 +159,25 @@ class GoogleNewsFetcher(BaseFetcher):
         feed = feedparser.parse(response.content)
         records: List[Dict[str, Any]] = []
         for entry in feed.entries[: settings.google_news_max_items]:
-            title = clean_text(entry.get("title", ""), 400)
-            link = (entry.get("link") or "").strip()
-            if not title or not link:
-                continue
-            outlet = ""
-            outlet_href = ""
-            source = entry.get("source")
-            if source:
-                outlet = clean_text(source.get("title", ""), 120)
-                outlet_href = source.get("href", "")
-            clean_title = title
-            if " - " in title:
-                head, suffix = title.rsplit(" - ", 1)
-                if suffix and (not outlet or suffix.lower() == outlet.lower()):
-                    clean_title = head
-                    outlet = suffix
-            published = entry.get("published") or entry.get("updated")
-            if not published:
-                parsed = entry.get("published_parsed")
-                if parsed:
-                    published = datetime(*parsed[:6], tzinfo=timezone.utc).isoformat()
-            records.append(
-                make_raw_article(
-                    source="google_news",
-                    source_id=link,
-                    title=clean_title,
-                    url=link,
-                    outlet=outlet,
-                    domain=urlparse(outlet_href).netloc if outlet_href else "",
-                    alignment="unrated",
-                    country=None,
-                    language=language.lower(),
-                    published_at=published,
-                    snippet=entry.get("summary", ""),
-                    category=None,
-                    source_metadata={
-                        "query": query,
-                        "edition": edition,
-                        "aggregator": "google_news",
-                        "outlet_href": outlet_href,
-                    },
-                    raw_payload={"title": title, "link": link, "published": published},
-                )
-            )
+            record = self._record_for_entry(entry, query, edition, language)
+            if record:
+                records.append(record)
         return records
 
     def fetch(self) -> List[Dict[str, Any]]:
+        self.begin_fetch()
         if self.is_circuit_open():
             logger.info("Google News fetch skipped: circuit breaker open.")
-            return []
+            return self.finish_fetch([], skipped_reason="circuit breaker open")
         if not feedparser:
             logger.warning("feedparser is not installed; skipping Google News crawl.")
-            return []
+            return self.finish_fetch([], skipped_reason="feedparser is not installed")
 
         records: List[Dict[str, Any]] = []
         seen: set = set()
         succeeded = 0
         failed = 0
+        feed_errors: Dict[str, str] = {}
         with ThreadPoolExecutor(max_workers=max(1, self.max_workers)) as pool:
             futures = {pool.submit(self._fetch_query, item): item for item in self.queries}
             for future in as_completed(futures):
@@ -140,6 +187,7 @@ class GoogleNewsFetcher(BaseFetcher):
                     succeeded += 1
                 except Exception as exc:
                     failed += 1
+                    feed_errors[item[0]] = f"{type(exc).__name__}: {exc}"[:200]
                     logger.warning("Google News query %r failed: %s", item[0], exc)
                     continue
                 for record in items:
@@ -150,9 +198,14 @@ class GoogleNewsFetcher(BaseFetcher):
                     records.append(record)
 
         records.sort(key=lambda r: r["published_at"] or "", reverse=True)
-        if succeeded:
-            self.record_success()
-        else:
-            self.record_failure()
         logger.info("Google News: %d articles from %d queries (%d failed)", len(records), succeeded, failed)
-        return records
+        if failed and succeeded:
+            return self.finish_fetch(records, status="partial", feed_errors=feed_errors)
+        if failed and not succeeded:
+            return self.finish_fetch(
+                records,
+                status="failed",
+                error=f"{failed} Google News queries failed",
+                feed_errors=feed_errors,
+            )
+        return self.finish_fetch(records)

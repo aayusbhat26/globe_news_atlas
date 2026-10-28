@@ -73,6 +73,78 @@
   white-space: nowrap;
 }
 
+.atlas-header__meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.atlas-header__meta .atlas-header__subtitle {
+  margin-top: 0;
+}
+
+.atlas-snapshot {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 1 auto;
+  min-width: 0;
+  padding: 2px 5px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 1px;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.55rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.atlas-snapshot:hover {
+  border-color: var(--border-medium);
+  color: var(--text-primary);
+}
+
+.atlas-snapshot__dot {
+  width: 5px;
+  height: 5px;
+  flex: 0 0 5px;
+  border-radius: 50%;
+  background: var(--accent-success);
+}
+
+.atlas-snapshot--live .atlas-snapshot__dot {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-success) 20%, transparent);
+}
+
+.atlas-snapshot--delayed {
+  color: var(--accent-amber);
+  border-color: color-mix(in srgb, var(--accent-amber) 45%, var(--border-subtle));
+}
+
+.atlas-snapshot--delayed .atlas-snapshot__dot {
+  background: var(--accent-amber);
+}
+
+.atlas-snapshot--stale {
+  color: var(--accent-danger);
+  border-color: color-mix(in srgb, var(--accent-danger) 45%, var(--border-subtle));
+}
+
+.atlas-snapshot--stale .atlas-snapshot__dot {
+  background: var(--accent-danger);
+}
+
+.atlas-snapshot__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 @media (max-width: 720px) {
   .atlas-header {
     padding: 0 14px;
@@ -83,6 +155,13 @@
   }
   .atlas-header__title {
     font-size: 1.15rem;
+  }
+  .atlas-header__meta {
+    margin-top: 3px;
+  }
+  .atlas-snapshot {
+    font-size: 0.5rem;
+    letter-spacing: 0.02em;
   }
 }
 
@@ -272,26 +351,60 @@
 }
 
 /* ------------------------------------------------ category index */
-.category-filter-bar {
+.category-filter {
   position: absolute;
   top: 64px;
   left: 0;
   right: 0;
   height: 44px;
+  z-index: 40;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-subtle);
+  pointer-events: auto;
+}
+
+.category-filter-bar {
+  position: relative;
+  width: 100%;
+  height: 100%;
   display: flex;
   align-items: stretch;
   gap: 2px;
   overflow-x: auto;
   padding: 0 18px;
-  background: var(--bg-surface);
-  border-bottom: 1px solid var(--border-subtle);
-  z-index: 40;
-  pointer-events: auto;
+  scroll-padding-inline: 40px;
   scrollbar-width: none;
   scroll-behavior: smooth;
   overscroll-behavior-x: contain;
-  mask-image: linear-gradient(to right, #000 calc(100% - 30px), transparent);
-  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 30px), transparent);
+}
+
+.category-filter__nav {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 2;
+  width: 30px;
+  border: 0;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.category-filter__nav:hover {
+  color: var(--text-primary);
+}
+
+.category-filter__nav--left {
+  left: 0;
+  background: linear-gradient(90deg, var(--bg-surface) 55%, transparent);
+}
+
+.category-filter__nav--right {
+  right: 0;
+  background: linear-gradient(270deg, var(--bg-surface) 55%, transparent);
 }
 
 .category-filter-bar::-webkit-scrollbar {
@@ -344,8 +457,7 @@
 @media (max-width: 720px) {
   .category-filter-bar {
     padding: 0 12px;
-    mask-image: linear-gradient(to right, #000 calc(100% - 22px), transparent);
-    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 22px), transparent);
+    scroll-padding-inline: 34px;
   }
   .category-chip {
     padding: 0 8px;
@@ -430,14 +542,23 @@
 
 .dock-count {
   display: flex;
-  align-items: center;
-  padding: 0 14px;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  padding: 5px 14px;
   border-left: 1px solid var(--border-subtle);
   font-family: var(--font-mono);
   font-size: 0.62rem;
   letter-spacing: 0.06em;
   color: var(--text-muted);
   white-space: nowrap;
+}
+
+.dock-count__cap {
+  font-size: 0.5rem;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  opacity: 0.85;
 }
 
 @media (max-width: 700px) {
@@ -596,6 +717,15 @@
 .user-menu__item:disabled {
   opacity: 0.6;
   cursor: wait;
+}
+
+.user-menu__error {
+  padding: 9px 16px 12px;
+  border-top: 1px solid var(--border-subtle);
+  color: var(--accent-danger);
+  font-family: var(--font-body);
+  font-size: 0.72rem;
+  line-height: 1.45;
 }
 
 @media (max-width: 720px) {

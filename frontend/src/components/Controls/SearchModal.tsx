@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import type { SnapshotEvent } from '../../types/snapshot';
 import type { SearchApiResult } from '../../types/event';
 import { getCategoryColor } from '../../utils/colors';
-import { fetchSearchResults } from '../../services/api';
+import { isAbortError, fetchSearchResults } from '../../services/api';
 import { Search, X, MapPin } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import './SearchModal.css';
@@ -13,6 +13,14 @@ interface SearchModalProps {
   events: SnapshotEvent[];
   onSelectEvent: (event: SnapshotEvent) => void;
 }
+
+const errorMessage = (error: unknown): string => {
+  if (error instanceof Error && error.message) return error.message;
+  return 'Search is unavailable right now.';
+};
+
+const SEARCH_PAGE_SIZE = 20;
+const SEARCH_MAX_LIMIT = 100;
 
 const toSnapshotEvent = (result: SearchApiResult): SnapshotEvent => ({
   id: result.id,
@@ -43,8 +51,12 @@ export const SearchModal: React.FC<SearchModalProps> = ({
 }) => {
   const { t } = useTranslation();
   const [query, setQuery] = useState('');
-  const [serverResults, setServerResults] = useState<SnapshotEvent[] | null>(null);
+  const [serverResults, setServerResults] = useState<SnapshotEvent[]>([]);
+  const [serverTotal, setServerTotal] = useState<number | null>(null);
   const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [limit, setLimit] = useState(SEARCH_PAGE_SIZE);
+  const [retryToken, setRetryToken] = useState(0);
   const panelRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const closeRef = useRef(onClose);
@@ -58,8 +70,12 @@ export const SearchModal: React.FC<SearchModalProps> = ({
     if (!isOpen) return;
     previousFocusRef.current = document.activeElement as HTMLElement | null;
     setQuery('');
-    setServerResults(null);
+    setServerResults([]);
+    setServerTotal(null);
     setSearching(false);
+    setSearchError(null);
+    setLimit(SEARCH_PAGE_SIZE);
+    setRetryToken(0);
     const focusTimer = window.setTimeout(() => inputRef.current?.focus(), 30);
 
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -101,22 +117,28 @@ export const SearchModal: React.FC<SearchModalProps> = ({
     if (!isOpen) return;
     const cleaned = query.trim();
     if (cleaned.length < 2) {
-      setServerResults(null);
+      setServerResults([]);
+      setServerTotal(null);
+      setSearchError(null);
       setSearching(false);
       return;
     }
     const controller = new AbortController();
     let active = true;
     setSearching(true);
+    setSearchError(null);
     const timer = window.setTimeout(() => {
-      fetchSearchResults(cleaned, '30d', 20, controller.signal)
-        .then((rows) => {
-          if (active) setServerResults(rows.map(toSnapshotEvent));
+      fetchSearchResults(cleaned, '30d', limit, controller.signal)
+        .then((response) => {
+          if (!active) return;
+          setServerResults(response.items.map(toSnapshotEvent));
+          setServerTotal(response.total);
         })
         .catch((error: unknown) => {
-          if (!active) return;
-          if (error instanceof DOMException && error.name === 'AbortError') return;
-          setServerResults(null);
+          if (!active || isAbortError(error)) return;
+          setServerResults([]);
+          setServerTotal(null);
+          setSearchError(errorMessage(error));
         })
         .finally(() => {
           if (active) setSearching(false);
@@ -127,11 +149,12 @@ export const SearchModal: React.FC<SearchModalProps> = ({
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [query, isOpen]);
+  }, [query, isOpen, limit, retryToken]);
 
   if (!isOpen) return null;
 
   const qLower = query.trim().toLowerCase();
+  const activeSearch = qLower.length >= 2;
   const matches = (value?: string | null) =>
     Boolean(value && value.toLowerCase().includes(qLower));
 
@@ -147,9 +170,73 @@ export const SearchModal: React.FC<SearchModalProps> = ({
         );
       })
     : events.slice(0, 10);
-  const usingServer = qLower.length >= 2 && serverResults !== null;
-  const filtered = usingServer ? serverResults : localResults;
-  const visibleResults = filtered.slice(0, 40);
+  const filtered = activeSearch ? serverResults : localResults;
+  const visibleResults = filtered;
+
+  const canLoadMore =
+    activeSearch &&
+    !searching &&
+    !searchError &&
+    limit < SEARCH_MAX_LIMIT &&
+    (serverTotal == null
+      ? serverResults.length >= limit
+      : serverResults.length < serverTotal);
+
+  const limitReached =
+    activeSearch && !searchError && (serverTotal == null || serverResults.length < serverTotal)
+      ? limit >= SEARCH_MAX_LIMIT
+      : false;
+
+  let resultHeading: string;
+  if (!qLower) {
+    resultHeading = t('recent_events');
+  } else if (!activeSearch) {
+    resultHeading = t('search_results_count', { count: localResults.length });
+  } else if (searching && serverResults.length === 0) {
+    resultHeading = t('searching');
+  } else if (searchError) {
+    resultHeading = t('search_failed_short');
+  } else if (serverTotal != null) {
+    resultHeading = t('search_showing_of_total', {
+      shown: serverResults.length,
+      total: serverTotal,
+    });
+  } else {
+    resultHeading = t('search_showing_limited', {
+      shown: serverResults.length,
+      limit,
+    });
+  }
+
+  const focusResult = (index: number) => {
+    const items = panelRef.current?.querySelectorAll<HTMLButtonElement>('.search-result-item');
+    if (!items || items.length === 0) return;
+    const bounded = Math.max(0, Math.min(index, items.length - 1));
+    items[bounded]?.focus();
+  };
+
+  const handleResultsKeyDown = (event: React.KeyboardEvent<HTMLUListElement>) => {
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    const items = Array.from(
+      panelRef.current?.querySelectorAll<HTMLButtonElement>('.search-result-item') ?? [],
+    );
+    if (items.length === 0) return;
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      focusResult(current < 0 ? 0 : current + 1);
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      if (current <= 0) inputRef.current?.focus();
+      else focusResult(current - 1);
+    } else if (event.key === 'Home') {
+      event.preventDefault();
+      focusResult(0);
+    } else if (event.key === 'End') {
+      event.preventDefault();
+      focusResult(items.length - 1);
+    }
+  };
 
   return (
     <div
@@ -174,7 +261,19 @@ export const SearchModal: React.FC<SearchModalProps> = ({
             className="search-input"
             placeholder={t('search_placeholder')}
             value={query}
-            onChange={(event) => setQuery(event.target.value)}
+            onChange={(event) => {
+              setQuery(event.target.value);
+              setLimit(SEARCH_PAGE_SIZE);
+              setServerResults([]);
+              setServerTotal(null);
+              setSearchError(null);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === 'ArrowDown') {
+                event.preventDefault();
+                focusResult(0);
+              }
+            }}
             aria-label={t('search_events')}
             autoComplete="off"
             spellCheck={false}
@@ -190,17 +289,21 @@ export const SearchModal: React.FC<SearchModalProps> = ({
         </div>
 
         <div className="search-results-head" aria-live="polite">
+          <span>{resultHeading}</span>
           <span>
-            {searching
-              ? t('searching')
-              : qLower
-                ? t('search_results_count', { count: filtered.length })
-                : t('recent_events')}
+            {!activeSearch && qLower
+              ? t('search_snapshot_only')
+              : limitReached
+                ? t('search_cap_note', { count: SEARCH_MAX_LIMIT })
+                : t('search_hint')}
           </span>
-          <span>{t('search_hint')}</span>
         </div>
 
-        <ul className="search-results-list" aria-busy={searching}>
+        <ul
+          className="search-results-list"
+          aria-busy={searching}
+          onKeyDown={handleResultsKeyDown}
+        >
           {visibleResults.map((item) => {
             const catColor = getCategoryColor(item.cat);
             return (
@@ -234,12 +337,39 @@ export const SearchModal: React.FC<SearchModalProps> = ({
               </li>
             );
           })}
-          {!searching && filtered.length === 0 && (
+          {activeSearch && searchError && (
+            <li className="search-empty search-error" role="alert">
+              <span>{searchError}</span>
+              <button
+                type="button"
+                className="search-error__retry"
+                onClick={() => setRetryToken((token) => token + 1)}
+              >
+                {t('retry')}
+              </button>
+            </li>
+          )}
+          {!searching && !searchError && filtered.length === 0 && (
             <li className="search-empty">
               {t('no_search_results', { query })}
             </li>
           )}
         </ul>
+
+        {canLoadMore && (
+          <div className="search-more">
+            <button
+              type="button"
+              className="search-more__btn"
+              onClick={() =>
+                setLimit((current) => Math.min(SEARCH_MAX_LIMIT, current + SEARCH_PAGE_SIZE))
+              }
+              disabled={searching}
+            >
+              {searching ? t('searching') : t('search_load_more')}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

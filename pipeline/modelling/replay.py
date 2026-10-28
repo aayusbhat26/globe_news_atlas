@@ -128,15 +128,33 @@ class ReplayBuilder:
                     continue
                 events = payload.get("events") or []
                 arcs = payload.get("arcs") or []
+                compact_events = [
+                    _compact_event(event)
+                    for event in events[:EVENTS_PER_FRAME]
+                    if isinstance(event, dict) and event.get("id")
+                ]
+                counts = dict(payload.get("n") or {})
+                window_total = int(counts.get("e") or len(events) or len(compact_events))
+                counts.update(
+                    {
+                        # Frame carries only the top-N slice; say so explicitly
+                        # instead of presenting 400 as the number of points.
+                        "shown": len(compact_events),
+                        "top_n": EVENTS_PER_FRAME,
+                        "frame_total": window_total,
+                        "truncated": len(compact_events) < window_total,
+                    }
+                )
                 frames[run_id] = {
                     "run_id": run_id,
                     "ts": stamp,
-                    "counts": payload.get("n") or {},
-                    "events": [
-                        _compact_event(event)
-                        for event in events[:EVENTS_PER_FRAME]
-                        if isinstance(event, dict) and event.get("id")
-                    ],
+                    "counts": counts,
+                    "events_note": (
+                        f"Top {len(compact_events)} of {window_total} events by importance"
+                        if len(compact_events) < window_total
+                        else f"All {len(compact_events)} events"
+                    ),
+                    "events": compact_events,
                     "arcs": [
                         _compact_arc(arc)
                         for arc in arcs[:ARCS_PER_FRAME]

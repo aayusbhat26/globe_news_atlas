@@ -28,7 +28,9 @@ import { ThinFilePage } from './components/Editions/ThinFilePage';
 import { RewindPage } from './components/Editions/RewindPage';
 import { EventPage } from './components/Editions/EventPage';
 import { EmbedPage } from './components/Editions/EmbedPage';
-import { usePathname } from './router';
+import { PageShell } from './components/Editions/PageShell';
+import { decodePathSegment, navigate, usePathname } from './router';
+import { formatAgeShort, formatRelativeTime } from './utils/time';
 
 import './i18n';
 import './App.css';
@@ -61,9 +63,51 @@ const AtlasApp: React.FC = () => {
   const { t } = useTranslation();
   const { isDark, toggleTheme } = useTheme();
   const hasWebGL = useWebGLSupport();
-  const { data: snapshot, isLoading, error, refresh } = useSnapshot(timeWindow);
+  const {
+    data: snapshot,
+    isLoading,
+    error,
+    lastUpdated,
+    streamError,
+    isOffline,
+    isStale,
+    refresh,
+  } = useSnapshot(timeWindow);
   const hasNoData = snapshot?.available === false;
-  const showDataBanner = Boolean((isLoading && !snapshot) || error || hasNoData);
+  const [clock, setClock] = useState<number>(() => Date.now());
+
+  // The age label needs to move even when no new snapshot arrives.
+  useEffect(() => {
+    const timer = window.setInterval(() => setClock(Date.now()), 60000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const snapshotAt = snapshot?.ts || lastUpdated?.toISOString() || null;
+  const snapshotAge = snapshotAt && clock ? formatRelativeTime(snapshotAt) : null;
+  const snapshotLabel = snapshotAt
+    ? t('snapshot_age', { time: snapshotAge })
+    : t('snapshot_waiting');  const snapshotTone = isOffline || isStale ? 'stale' : streamError ? 'delayed' : 'live';
+  const snapshotTitle = [
+    snapshotAt ? new Date(snapshotAt).toLocaleString() : null,
+    isOffline ? t('offline_banner') : null,
+    streamError ? t('live_updates_offline') : null,
+    error ? error : null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+
+  const showDataBanner = Boolean(
+    isOffline || error || hasNoData || (isLoading && !snapshot) || (streamError && !error),
+  );
+  const bannerTone = isOffline
+    ? 'offline'
+    : error
+      ? isStale
+        ? 'stale'
+        : 'error'
+      : hasNoData
+        ? 'empty'
+        : 'notice';
 
   useEffect(() => {
     document.title = 'Globe News Atlas — World events and coverage';
@@ -181,6 +225,10 @@ const AtlasApp: React.FC = () => {
             }
             setViewMode(mode);
           }}
+          snapshotLabel={snapshotLabel}
+          snapshotTone={snapshotTone}
+          snapshotTitle={snapshotTitle}
+          onRefreshSnapshot={refresh}
         />
 
         {/* Category index */}
@@ -189,27 +237,41 @@ const AtlasApp: React.FC = () => {
           onSelectCategory={selectCategory}
         />
 
-        {/* Live data availability banner */}
+        {/* Data freshness, connectivity and live-stream status */}
         {showDataBanner && (
           <div
-            className={`data-banner${error ? ' data-banner--error' : ' data-banner--empty'}`}
-            role="status"
+            className={`data-banner data-banner--${bannerTone}`}
+            role={bannerTone === 'error' ? 'alert' : 'status'}
+            aria-live="polite"
           >
-            {isLoading && !snapshot && !error && <span>Loading live event data...</span>}
-            {error && (
+            {isOffline && <span>{t('offline_banner')}</span>}
+            {!isOffline && error && snapshot && (
               <span>
-                Live API unavailable: {error}
-                {snapshot ? ' Showing the last loaded snapshot.' : ''}
+                {t('stale_data_banner', {
+                  time: formatAgeShort(snapshot.ts || lastUpdated?.toISOString()),
+                })}
+                {error ? ` (${error})` : ''}
               </span>
             )}
-            {hasNoData && !error && (
+            {!isOffline && error && !snapshot && (
+              <span>
+                Live API unavailable: {error}
+              </span>
+            )}
+            {!isOffline && !error && streamError && (
+              <span>{t('live_updates_offline')}</span>
+            )}
+            {isLoading && !snapshot && !error && !isOffline && (
+              <span>Loading live event data...</span>
+            )}
+            {hasNoData && !error && !isOffline && (
               <span>
                 No pipeline snapshot has been generated yet. Run the ingestion pipeline to populate the globe.
               </span>
             )}
-            {(error || hasNoData) && !isLoading && (
+            {(error || hasNoData || isOffline) && !isLoading && (
               <button className="data-banner__btn" onClick={refresh}>
-                Retry
+                {t('retry')}
               </button>
             )}
           </div>
@@ -256,10 +318,12 @@ const AtlasApp: React.FC = () => {
               activeCountry={countryFocus?.name || null}
               targetCoords={targetCoords}
               isDark={isDark}
+              insetTop={108}
               onWebGLError={() => {
                 setWebglError(true);
                 setViewMode('list');
               }}
+              onWebGLRestored={() => setWebglError(false)}
             />
           </Suspense>
         ) : (
@@ -305,11 +369,10 @@ const AtlasApp: React.FC = () => {
           spectrumFilter={spectrumFilter}
           onChangeSpectrumFilter={setSpectrumFilter}
           eventCount={filteredEvents.length}
-          totalEventCount={
-            activeCategory === 'all' && spectrumFilter === 'all'
-              ? snapshot?.n.total ?? filteredEvents.length
-              : filteredEvents.length
-          }
+          matchingTotal={snapshot?.n.e ?? snapshot?.events.length ?? filteredEvents.length}
+          windowTotal={snapshot?.n.total ?? snapshot?.n.e ?? filteredEvents.length}
+          windowCapped={Boolean(snapshot?.n.capped)}
+          filtersActive={activeCategory !== 'all' || spectrumFilter !== 'all'}
         />
 
         {/* Full 90% Viewport Detail Modal */}
@@ -340,14 +403,39 @@ const AtlasApp: React.FC = () => {
   );
 };
 
+const NotFoundPage: React.FC = () => (
+  <PageShell
+    kicker="404"
+    title="This page is not on the atlas"
+    width="narrow"
+    documentTitle="Page not found — Globe News Atlas"
+  >
+    <div className="page-empty">
+      <h2>The address does not match an Atlas edition or dispatch.</h2>
+      <p>Check the link, or return to the globe and search the archive.</p>
+      <button type="button" className="page-primary" onClick={() => navigate('/')}>
+        Back to the Atlas
+      </button>
+    </div>
+  </PageShell>
+);
+
+const normalisePath = (raw: string): string => {
+  if (!raw || raw === '/') return '/';
+  const trimmed = raw.replace(/\/+$/, '');
+  return trimmed || '/';
+};
+
 export const App: React.FC = () => {
-  const pathname = usePathname();
+  const rawPathname = usePathname();
+  const pathname = normalisePath(rawPathname);
   const authMode = AUTH_ROUTES[pathname];
-  const embedMatch = pathname.match(/^\/embed\/event\/([^/]+)\/?$/);
-  const eventMatch = pathname.match(/^\/event\/([^/]+)\/?$/);
+  const embedMatch = pathname.match(/^\/embed\/event\/([^/]+)$/);
+  const eventMatch = pathname.match(/^\/event\/([^/]+)$/);
 
   if (authMode) {
-    return <AuthPage mode={authMode} />;
+    // Each auth mode owns its form, notices and one-time token state.
+    return <AuthPage key={authMode} mode={authMode} />;
   }
   if (pathname === '/account') {
     return <AccountPage />;
@@ -368,12 +456,15 @@ export const App: React.FC = () => {
     return <RewindPage />;
   }
   if (embedMatch) {
-    return <EmbedPage eventId={decodeURIComponent(embedMatch[1])} />;
+    return <EmbedPage eventId={decodePathSegment(embedMatch[1])} />;
   }
   if (eventMatch) {
-    return <EventPage eventId={decodeURIComponent(eventMatch[1])} />;
+    return <EventPage eventId={decodePathSegment(eventMatch[1])} />;
   }
-  return <AtlasApp />;
+  if (pathname === '/') {
+    return <AtlasApp />;
+  }
+  return <NotFoundPage />;
 };
 
 export default App;

@@ -11,6 +11,10 @@ interface HeaderProps {
   onToggleTheme: () => void;
   viewMode: 'globe' | 'flat' | 'list';
   onChangeViewMode: (mode: 'globe' | 'flat' | 'list') => void;
+  snapshotLabel?: string;
+  snapshotTone?: 'live' | 'delayed' | 'stale';
+  snapshotTitle?: string;
+  onRefreshSnapshot?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -19,6 +23,10 @@ export const Header: React.FC<HeaderProps> = ({
   onToggleTheme,
   viewMode,
   onChangeViewMode,
+  snapshotLabel,
+  snapshotTone = 'live',
+  snapshotTitle,
+  onRefreshSnapshot,
 }) => {
   const { t, i18n } = useTranslation();
   const language = i18n.resolvedLanguage || i18n.language.split('-')[0] || 'en';
@@ -38,7 +46,21 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
         <div>
           <h1 className="atlas-header__title">{t('app_title')}</h1>
-          <p className="atlas-header__subtitle">{t('app_subtitle')}</p>
+          <div className="atlas-header__meta">
+            <p className="atlas-header__subtitle">{t('app_subtitle')}</p>
+            {snapshotLabel && (
+              <button
+                type="button"
+                className={`atlas-snapshot atlas-snapshot--${snapshotTone}`}
+                onClick={onRefreshSnapshot}
+                title={snapshotTitle || snapshotLabel}
+                aria-label={`${snapshotLabel}. ${t('refresh_snapshot')}`}
+              >
+                <span className="atlas-snapshot__dot" aria-hidden="true" />
+                <span className="atlas-snapshot__label">{snapshotLabel}</span>
+              </button>
+            )}
+          </div>
         </div>
       </div>
 

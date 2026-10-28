@@ -23,13 +23,15 @@ class USGSFetcher(BaseFetcher):
         self.session.headers.update({"User-Agent": "GlobeNewsAtlas/1.0 (USGS earthquake feed)"})
 
     def fetch(self) -> List[Dict[str, Any]]:
+        self.begin_fetch()
         if self.is_circuit_open():
             logger.info("USGS fetch skipped: circuit breaker open.")
-            return []
+            return self.finish_fetch([], skipped_reason="circuit breaker open")
 
         records: List[Dict[str, Any]] = []
         seen: set = set()
         succeeded = 0
+        feed_errors: Dict[str, str] = {}
         for feed_url in FEEDS:
             try:
                 response = self.session.get(feed_url, timeout=settings.request_timeout * 2)
@@ -38,6 +40,7 @@ class USGSFetcher(BaseFetcher):
                 succeeded += 1
             except Exception as exc:
                 logger.warning("USGS feed failed (%s): %s", feed_url, exc)
+                feed_errors[feed_url] = f"{type(exc).__name__}: {exc}"[:200]
                 continue
 
             for feature in features:
@@ -99,10 +102,15 @@ class USGSFetcher(BaseFetcher):
                     )
                 )
 
-        if succeeded:
-            self.record_success()
-        else:
-            self.record_failure()
         records.sort(key=lambda r: r["published_at"] or "", reverse=True)
         logger.info("USGS gathered %d earthquakes", len(records))
-        return records
+        if feed_errors and succeeded:
+            return self.finish_fetch(records, status="partial", feed_errors=feed_errors)
+        if feed_errors and not succeeded:
+            return self.finish_fetch(
+                records,
+                status="failed",
+                error="all USGS feeds failed",
+                feed_errors=feed_errors,
+            )
+        return self.finish_fetch(records)

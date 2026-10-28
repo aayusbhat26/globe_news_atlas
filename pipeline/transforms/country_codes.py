@@ -100,6 +100,27 @@ ISO2_TO_NAME = {
     "ZW": "Zimbabwe", "XK": "Kosovo",
 }
 
+# The original table omitted small states, which silently dropped their
+# bilateral arcs (a Fiji endpoint could not be labelled or validated).
+ISO2_TO_NAME.update({
+    "AD": "Andorra", "AG": "Antigua and Barbuda", "BS": "Bahamas", "BH": "Bahrain",
+    "BB": "Barbados", "BZ": "Belize", "BJ": "Benin", "BT": "Bhutan",
+    "BW": "Botswana", "BN": "Brunei", "BF": "Burkina Faso", "BI": "Burundi",
+    "CV": "Cabo Verde", "CF": "Central African Republic", "TD": "Chad",
+    "KM": "Comoros", "DJ": "Djibouti", "DM": "Dominica", "GQ": "Equatorial Guinea",
+    "ER": "Eritrea", "SZ": "Eswatini", "FJ": "Fiji", "GA": "Gabon",
+    "GM": "Gambia", "GD": "Grenada", "GN": "Guinea", "GW": "Guinea-Bissau",
+    "GY": "Guyana", "HT": "Haiti", "KI": "Kiribati", "LS": "Lesotho",
+    "LR": "Liberia", "LI": "Liechtenstein", "MG": "Madagascar", "MW": "Malawi",
+    "MH": "Marshall Islands", "MR": "Mauritania", "MU": "Mauritius",
+    "FM": "Micronesia", "MC": "Monaco", "NA": "Namibia", "NR": "Nauru",
+    "PW": "Palau", "PG": "Papua New Guinea", "KN": "Saint Kitts and Nevis",
+    "LC": "Saint Lucia", "VC": "Saint Vincent and the Grenadines", "WS": "Samoa",
+    "SM": "San Marino", "ST": "Sao Tome and Principe", "SC": "Seychelles",
+    "SL": "Sierra Leone", "SB": "Solomon Islands", "SR": "Suriname",
+    "TO": "Tonga", "TV": "Tuvalu", "VU": "Vanuatu", "VA": "Vatican City",
+})
+
 NAME_ALIASES = {
     "united states of america": "United States",
     "u.s.": "United States",
@@ -346,8 +367,65 @@ def _text_patterns() -> List[tuple]:
 
 _TEXT_PATTERNS = _text_patterns()
 
+# These names are also ordinary given names, surnames and US state names.
+# Body text must not promote them to countries on a bare mention: "Michael B
+# Jordan", "Georgia" in a company name or a person called Chad are not
+# datelines. A nearby preposition, the demonym or a known city makes the
+# mention explicit and keeps it.
+AMBIGUOUS_COUNTRY_NAMES = {"georgia", "jordan", "chad", "guinea", "niger", "dominica"}
 
-def countries_in_text(*texts: Optional[str], limit: int = 5) -> List[str]:
+_AMBIGUOUS_CUES = {
+    "georgia": {"tbilisi", "caucasus", "abkhazia", "ossetia"},
+    "jordan": {"amman", "kingdom", "jordanian", "jordanians"},
+    "chad": {"n'djamena", "ndjamena", "chadian"},
+    "guinea": {"conakry", "guinean"},
+    "niger": {"niamey", "nigerien"},
+    "dominica": {"roseau", "dominican"},
+}
+_LOCATION_PREPOSITION = re.compile(
+    r"(?<![a-z])(?:in|at|near|across|from|around|outside|inside|within|to|into)\s+(?:the\s+)?$"
+)
+_POSSESSIVE_STATE = re.compile(r"^['’]s\s+(?:king|kingdom|government|army|military|border|capital|official|officials|state|authorities)\b")
+
+
+def _ascii_text(value: Optional[str]) -> str:
+    return _ascii(str(value or "")).lower()
+
+
+def country_mention_supported(name: str, text: str) -> bool:
+    """Return True when an ambiguous country name is used as a place, not a name.
+
+    This is deliberately conservative: an unsupported mention is dropped and
+    the event stays unresolved rather than being plotted in the wrong country.
+    """
+    canonical = canonical_country(name)
+    if not canonical:
+        return False
+    key = canonical.lower()
+    if key not in AMBIGUOUS_COUNTRY_NAMES:
+        return True
+    blob = _ascii_text(text)
+    if not blob:
+        return False
+    cues = _AMBIGUOUS_CUES.get(key, set())
+    if any(cue in blob for cue in cues):
+        return True
+    pattern = re.compile(r"(?<![a-z])" + re.escape(key) + r"(?![a-z])")
+    for match in pattern.finditer(blob):
+        before = blob[max(0, match.start() - 28): match.start()]
+        after = blob[match.end(): match.end() + 48]
+        if _LOCATION_PREPOSITION.search(before):
+            return True
+        if _POSSESSIVE_STATE.search(after):
+            return True
+    return False
+
+
+def countries_in_text(
+    *texts: Optional[str],
+    limit: int = 5,
+    allow_ambiguous: bool = True,
+) -> List[str]:
     """Return canonical country names mentioned in free text (word-boundary match)."""
     blob = _ascii(" ".join(t for t in texts if t)).lower()
     if not blob:
@@ -361,6 +439,8 @@ def countries_in_text(*texts: Optional[str], limit: int = 5) -> List[str]:
     occupied: List[tuple] = []
     for pattern, name in _TEXT_PATTERNS:
         if name in found:
+            continue
+        if not allow_ambiguous and not country_mention_supported(name, blob):
             continue
         for match in pattern.finditer(blob):
             start, end = match.span()

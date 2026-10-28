@@ -351,6 +351,18 @@
   color: var(--text-muted);
 }
 
+.page-refreshing {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  font-family: var(--font-mono);
+  font-size: 0.52rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
 .page-loading,
 .page-empty,
 .page-error {

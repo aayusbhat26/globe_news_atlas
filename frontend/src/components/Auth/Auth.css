@@ -820,6 +820,33 @@
   font-size: inherit;
 }
 
+.auth-resend {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-medium);
+  border-left: 3px solid var(--accent-amber);
+  background: var(--bg-surface);
+}
+
+.auth-resend p {
+  font-size: 0.76rem;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.auth-resend .auth-notice {
+  width: 100%;
+  margin: 0;
+}
+
+.auth-resend .auth-text-button {
+  padding: 0;
+}
+
 .auth-panel__switch {
   margin-top: 20px;
   font-size: 0.77rem;

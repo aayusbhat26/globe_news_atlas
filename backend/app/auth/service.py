@@ -6,6 +6,7 @@ import hmac
 import logging
 import re
 import sqlite3
+import threading
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
@@ -50,7 +51,12 @@ TOTP_PENDING_TTL_SECONDS = 10 * 60
 CHALLENGE_TTL_SECONDS = 5 * 60
 CHALLENGE_MAX_ATTEMPTS = 5
 RESEND_COOLDOWN_SECONDS = 60
+# Google-only accounts must prove a recent sign-in before sensitive changes.
+REAUTH_WINDOW_SECONDS = 10 * 60
 GENERIC_LOGIN_ERROR = "Email or password is incorrect."
+GENERIC_SIGNUP_MESSAGE = (
+    "If this address can be used, we have sent a confirmation link."
+)
 GENERIC_RESET_MESSAGE = (
     "If an account exists for that address, a reset link is on its way."
 )
@@ -115,6 +121,22 @@ def _assert_password_policy(password: str, email: str) -> None:
             400,
             "breached_password",
             "That password appears in a known data breach. Choose a different one.",
+        )
+
+
+def _require_recent_session(
+    session_started_at: Optional[int], action: str
+) -> None:
+    """Gate password creation/deletion for accounts with no local credential."""
+    timestamp = now_ts()
+    if (
+        not session_started_at
+        or timestamp - int(session_started_at) > REAUTH_WINDOW_SECONDS
+    ):
+        raise AuthError(
+            403,
+            "reauth_required",
+            f"Sign in again with Google before {action}.",
         )
 
 
@@ -268,7 +290,7 @@ def sign_up(
             )
         return {
             "status": "check_email",
-            "message": "If this address can be used, we have sent a confirmation link.",
+            "message": GENERIC_SIGNUP_MESSAGE,
             "dev_verification_link": dev_link,
         }
 
@@ -282,7 +304,7 @@ def sign_up(
     except (sqlite3.IntegrityError, DatabaseIntegrityError):
         return {
             "status": "check_email",
-            "message": "If this address can be used, we have sent a confirmation link.",
+            "message": GENERIC_SIGNUP_MESSAGE,
             "dev_verification_link": None,
         }
 
@@ -292,7 +314,7 @@ def sign_up(
     )
     return {
         "status": "check_email",
-        "message": "Check your inbox to confirm the account. You can also sign in now.",
+        "message": GENERIC_SIGNUP_MESSAGE,
         "dev_verification_link": dev_link,
     }
 
@@ -313,15 +335,9 @@ def log_in(
     if not valid or row is None:
         if row is not None:
             if not row["locked_until"] or int(row["locked_until"]) <= timestamp:
-                failed = int(row["failed_login_count"]) + 1
-                lock_seconds = 0
-                if failed >= max(1, settings.auth_lockout_attempts):
-                    exponent = min(failed - settings.auth_lockout_attempts, 6)
-                    lock_seconds = min(3600, 60 * (2 ** exponent))
-                auth_store.record_login_failure(
-                    row["user_id"],
-                    failed,
-                    timestamp + lock_seconds if lock_seconds else None,
+                # Atomic increment: concurrent failures must all be counted.
+                failed, _ = auth_store.increment_login_failure(
+                    row["user_id"], settings.auth_lockout_attempts
                 )
                 auth_store.record_event(
                     row["user_id"],
@@ -333,11 +349,20 @@ def log_in(
         raise AuthError(401, "invalid_credentials", GENERIC_LOGIN_ERROR)
 
     if row["locked_until"] and int(row["locked_until"]) > timestamp:
-        retry = max(1, int(row["locked_until"]) - timestamp)
         raise AuthError(
             429,
             "account_locked",
             "Too many attempts. Wait a few minutes before trying again.",
+        )
+
+    # Password sign-in is only allowed after the address is confirmed, so an
+    # attacker who pre-registers a victim's email cannot hold the account.
+    if not row["email_verified_at"]:
+        raise AuthError(
+            403,
+            "email_not_verified",
+            "Confirm your email address before signing in. "
+            "Check your inbox for the confirmation link.",
         )
 
     if row["totp_enabled_at"]:
@@ -422,11 +447,19 @@ def complete_two_factor(
             raise AuthError(429, "too_many_codes", "Too many attempts. Sign in again.")
         raise AuthError(401, "invalid_code", "That code did not match. Try again.")
 
-    if step:
-        auth_store.set_totp_step(row["user_id"], step)
+    # Each factor is single-use. Claim the TOTP step or recovery code first,
+    # then consume the challenge; a concurrent duplicate loses one of these
+    # atomic races and never receives a session.
     if recovery_id:
-        auth_store.mark_recovery_code_used(recovery_id, row["user_id"])
-    auth_store.delete_login_challenge(token_hash)
+        if not auth_store.mark_recovery_code_used(recovery_id, row["user_id"]):
+            raise AuthError(401, "invalid_code", "That code did not match. Try again.")
+    elif step:
+        if not auth_store.claim_totp_step(row["user_id"], step):
+            raise AuthError(401, "invalid_code", "That code did not match. Try again.")
+    if not auth_store.consume_login_challenge(token_hash):
+        raise AuthError(
+            400, "challenge_expired", "This sign-in attempt expired. Start again."
+        )
 
     effective_remember = bool(row["remember"]) if remember is None else remember
     token, expires_at = _create_session(
@@ -459,6 +492,26 @@ def log_out(token: Optional[str], ip: Optional[str], user_agent: Optional[str]) 
         auth_store.record_event(row["user_id"], "logout", ip, user_agent)
 
 
+def _deliver_password_reset(
+    user_id: str,
+    email: str,
+    display_name: str,
+    token: str,
+    ip: Optional[str],
+    user_agent: Optional[str],
+) -> None:
+    delivery = email_service.send_password_reset(
+        email, display_name, token, RESET_TTL_MINUTES
+    )
+    auth_store.record_event(
+        user_id,
+        "password_reset_requested",
+        ip,
+        user_agent,
+        {"delivery": delivery},
+    )
+
+
 def request_password_reset(email: str, ip: Optional[str], user_agent: Optional[str]) -> Dict[str, Any]:
     address = _normalise_email(email)
     row = auth_store.get_user_by_email(address)
@@ -473,17 +526,36 @@ def request_password_reset(email: str, ip: Optional[str], user_agent: Optional[s
                 token_hash=email_token_hash(token),
                 expires_at=now_ts() + RESET_TTL_MINUTES * 60,
             )
-            delivery = email_service.send_password_reset(
-                row["email"], row["display_name"], token, RESET_TTL_MINUTES
-            )
-            dev_link = _dev_link(email_service.reset_link(token), delivery)
-            auth_store.record_event(
-                row["user_id"],
-                "password_reset_requested",
-                ip,
-                user_agent,
-                {"delivery": delivery},
-            )
+            if settings.email_delivery == "dev":
+                # Dev logs the message synchronously so tests and local flows
+                # can surface the link immediately.
+                delivery = email_service.send_password_reset(
+                    row["email"], row["display_name"], token, RESET_TTL_MINUTES
+                )
+                dev_link = _dev_link(email_service.reset_link(token), delivery)
+                auth_store.record_event(
+                    row["user_id"],
+                    "password_reset_requested",
+                    ip,
+                    user_agent,
+                    {"delivery": delivery},
+                )
+            else:
+                # Real SMTP/API delivery is slow and can time out. Send it off
+                # the request path so account existence is not timing-visible.
+                threading.Thread(
+                    target=_deliver_password_reset,
+                    args=(
+                        row["user_id"],
+                        row["email"],
+                        row["display_name"],
+                        token,
+                        ip,
+                        user_agent,
+                    ),
+                    name="password-reset-email",
+                    daemon=True,
+                ).start()
     return {
         "status": "sent",
         "message": GENERIC_RESET_MESSAGE,
@@ -518,6 +590,7 @@ def reset_password(
     auth_store.update_password(row["user_id"], hash_password(password))
     auth_store.mark_email_verified(row["user_id"])
     auth_store.revoke_all_sessions(row["user_id"])
+    auth_store.invalidate_auth_tokens(row["user_id"], [VERIFY_PURPOSE, RESET_PURPOSE])
     auth_store.record_event(row["user_id"], "password_reset", ip, user_agent)
     email_service.send_security_notice(
         row["email"],
@@ -596,6 +669,7 @@ def change_password(
     code: str = "",
     ip: Optional[str],
     user_agent: Optional[str],
+    session_started_at: Optional[int] = None,
 ) -> Dict[str, Any]:
     row = auth_store.get_user_by_id(user_id)
     if not row:
@@ -615,13 +689,18 @@ def change_password(
                 "invalid_code",
                 "Enter a current authenticator or recovery code to set a password.",
             )
-        if step:
-            auth_store.set_totp_step(user_id, step)
         if recovery_id:
-            auth_store.mark_recovery_code_used(recovery_id, user_id)
+            if not auth_store.mark_recovery_code_used(recovery_id, user_id):
+                raise AuthError(400, "invalid_code", "That code has already been used.")
+        elif step and not auth_store.claim_totp_step(user_id, step):
+            raise AuthError(400, "invalid_code", "That code has already been used.")
+    else:
+        # Google-only account: a recent sign-in is the only available proof.
+        _require_recent_session(session_started_at, "setting a password")
     _assert_password_policy(new_password, row["email"])
     auth_store.update_password(user_id, hash_password(new_password))
     auth_store.revoke_all_sessions(user_id, except_session_id=session_id)
+    auth_store.invalidate_auth_tokens(user_id, [VERIFY_PURPOSE, RESET_PURPOSE])
     auth_store.record_event(user_id, "password_changed", ip, user_agent)
     email_service.send_security_notice(
         row["email"],
@@ -745,6 +824,7 @@ def enable_two_factor(
     code: str,
     ip: Optional[str],
     user_agent: Optional[str],
+    session_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     row = auth_store.get_user_by_id(user_id)
     if not row:
@@ -764,9 +844,12 @@ def enable_two_factor(
     if not ok:
         raise AuthError(400, "invalid_code", "That code did not match. Check your authenticator.")
     auth_store.enable_totp(user_id)
-    auth_store.set_totp_step(user_id, step)
+    auth_store.claim_totp_step(user_id, step)
     codes, hashes = generate_recovery_codes()
     auth_store.replace_recovery_codes(user_id, hashes)
+    # Enabling a second factor is a credential change: sign out other devices
+    # but keep the session that performed the change.
+    auth_store.revoke_all_sessions(user_id, except_session_id=session_id)
     auth_store.record_event(user_id, "totp_enabled", ip, user_agent)
     email_service.send_security_notice(
         row["email"],
@@ -795,9 +878,13 @@ def disable_two_factor(
         valid, _ = verify_password(password, row["password_hash"])
         if not valid:
             raise AuthError(400, "invalid_password", "Your password is incorrect.")
-    ok, _, _ = _verify_second_factor(row, code)
+    ok, step, recovery_id = _verify_second_factor(row, code)
     if not ok:
         raise AuthError(400, "invalid_code", "Enter a current authenticator or recovery code.")
+    if recovery_id and not auth_store.mark_recovery_code_used(recovery_id, user_id):
+        raise AuthError(400, "invalid_code", "That code has already been used.")
+    if step:
+        auth_store.claim_totp_step(user_id, step)
     auth_store.disable_totp(user_id)
     auth_store.record_event(user_id, "totp_disabled", ip, user_agent)
     email_service.send_security_notice(
@@ -830,8 +917,10 @@ def regenerate_recovery_codes(
     ok, step, recovery_id = _verify_second_factor(row, code)
     if not ok:
         raise AuthError(400, "invalid_code", "Enter a current authenticator or recovery code.")
+    if recovery_id and not auth_store.mark_recovery_code_used(recovery_id, user_id):
+        raise AuthError(400, "invalid_code", "That code has already been used.")
     if step:
-        auth_store.set_totp_step(user_id, step)
+        auth_store.claim_totp_step(user_id, step)
     codes, hashes = generate_recovery_codes()
     auth_store.replace_recovery_codes(user_id, hashes)
     auth_store.record_event(user_id, "recovery_codes_regenerated", ip, user_agent)
@@ -846,6 +935,7 @@ def delete_account(
     code: str = "",
     ip: Optional[str],
     user_agent: Optional[str],
+    session_started_at: Optional[int] = None,
 ) -> Dict[str, Any]:
     row = auth_store.get_user_by_id(user_id)
     if not row:
@@ -857,13 +947,20 @@ def delete_account(
         if not valid:
             raise AuthError(400, "invalid_password", "Your password is incorrect.")
     elif row["totp_enabled_at"]:
-        ok, _, _ = _verify_second_factor(row, code)
+        ok, step, recovery_id = _verify_second_factor(row, code)
         if not ok:
             raise AuthError(
                 400,
                 "invalid_code",
                 "Enter a current authenticator or recovery code to close the account.",
             )
+        if recovery_id and not auth_store.mark_recovery_code_used(recovery_id, user_id):
+            raise AuthError(400, "invalid_code", "That code has already been used.")
+        if step:
+            auth_store.claim_totp_step(user_id, step)
+    else:
+        # Google-only account: require a sign-in from the last ten minutes.
+        _require_recent_session(session_started_at, "closing the account")
     auth_store.record_event(user_id, "account_deleted", ip, user_agent)
     auth_store.delete_user(user_id)
     email_service.send_security_notice(
@@ -976,10 +1073,25 @@ def complete_google(
                     "google_already_linked",
                     "This reader account uses a different Google sign-in.",
                 )
+            if not row["email_verified_at"]:
+                # Never auto-link into an unverified password registration:
+                # whoever created it may not own the mailbox.
+                auth_store.record_event(
+                    row["user_id"],
+                    "google_link_blocked_unverified",
+                    ip,
+                    user_agent,
+                    {"method": "signin"},
+                )
+                raise AuthError(
+                    403,
+                    "google_account_unverified",
+                    "This email already has an account that is not verified. "
+                    "Verify it or reset the password before using Google sign-in.",
+                )
             auth_store.link_identity(
                 "google", profile.subject, row["user_id"], profile.email
             )
-            auth_store.mark_email_verified(row["user_id"])
             auth_store.record_event(
                 row["user_id"], "google_linked", ip, user_agent, {"method": "signin"}
             )
@@ -992,9 +1104,25 @@ def complete_google(
                     email_verified=True,
                 )
             except (sqlite3.IntegrityError, DatabaseIntegrityError):
+                # Lost a race with another signup for this address. Never
+                # attach Google to an unverified registration.
                 row = auth_store.get_user_by_email(profile.email)
                 if not row:
                     raise AuthError(400, "google_signup_failed", "Could not create the account.")
+                if not row["email_verified_at"]:
+                    auth_store.record_event(
+                        row["user_id"],
+                        "google_link_blocked_unverified",
+                        ip,
+                        user_agent,
+                        {"method": "signin"},
+                    )
+                    raise AuthError(
+                        403,
+                        "google_account_unverified",
+                        "This email already has an account that is not verified. "
+                        "Verify it or reset the password before using Google sign-in.",
+                    )
             auth_store.link_identity(
                 "google", profile.subject, row["user_id"], profile.email
             )

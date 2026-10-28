@@ -62,10 +62,22 @@ export const DetailModal: React.FC<DetailModalProps> = ({
     });
   };
   const dossierRef = useRef<HTMLElement>(null);
-  useFocusTrap(Boolean(data), dossierRef, onClose, {
+  const dialogLabel = data?.title || t('event_dossier');
+  useFocusTrap(true, dossierRef, onClose, {
     // The correction form sits on top of the dossier; let it close first.
     skipEscape: () => Boolean(document.querySelector('.report-modal-backdrop')),
   });
+
+  const dialogRail = (
+    <div className="dossier__rail">
+      <span className="dossier__rail-label">Globe News Atlas</span>
+      <span className="dossier__rail-divider">/</span>
+      <span className="dossier__rail-label">{t('event_dossier')}</span>
+      <button type="button" data-autofocus className="dossier__close" onClick={onClose} aria-label={t('close')}>
+        <X size={18} />
+      </button>
+    </div>
+  );
 
   useEffect(() => {
     let isMounted = true;
@@ -94,24 +106,47 @@ export const DetailModal: React.FC<DetailModalProps> = ({
 
   if (loading) {
     return (
-      <div className="dossier-backdrop" onClick={onClose}>
-        <div className="dossier dossier--message" onClick={(e) => e.stopPropagation()}>
-          <p className="dossier__message">Loading the event dossier…</p>
-        </div>
+      <div className="dossier-backdrop" onClick={onClose} role="presentation">
+        <article
+          ref={dossierRef}
+          className="dossier dossier--message"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t('event_dossier')}
+          aria-busy="true"
+          tabIndex={-1}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {dialogRail}
+          <div className="dossier__message-body">
+            <p className="dossier__message">Loading the event dossier…</p>
+          </div>
+        </article>
       </div>
     );
   }
 
   if (error && !data) {
     return (
-      <div className="dossier-backdrop" onClick={onClose}>
-        <div className="dossier dossier--message" onClick={(e) => e.stopPropagation()}>
-          <p className="dossier__message dossier__message--error">Could not load this event</p>
-          <p className="dossier__message-detail">{error}</p>
-          <button className="report-btn" onClick={() => setReloadToken((token) => token + 1)}>
-            Try again
-          </button>
-        </div>
+      <div className="dossier-backdrop" onClick={onClose} role="presentation">
+        <article
+          ref={dossierRef}
+          className="dossier dossier--message"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t('event_dossier')}
+          tabIndex={-1}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {dialogRail}
+          <div className="dossier__message-body">
+            <p className="dossier__message dossier__message--error">Could not load this event</p>
+            <p className="dossier__message-detail">{error}</p>
+            <button className="report-btn" onClick={() => setReloadToken((token) => token + 1)}>
+              {t('retry')}
+            </button>
+          </div>
+        </article>
       </div>
     );
   }
@@ -129,6 +164,12 @@ export const DetailModal: React.FC<DetailModalProps> = ({
   const coverageColumns = data.coverage.filter(
     (col) => col.outlet_count > 0 || (col.sample_headlines?.length ?? 0) > 0
   );
+  const sourcesShown = data.sources_shown ?? data.sources.length;
+  const sourcesTotal = Math.max(
+    data.sources_total ?? data.source_count ?? data.sources.length,
+    sourcesShown,
+  );
+  const sourcesSampled = sourcesTotal > sourcesShown;
   const normalizedTitle = data.title.trim().toLowerCase();
   const normalizedSummary = data.summary.trim().toLowerCase();
   const summaryIsHeadlineOnly =
@@ -150,19 +191,18 @@ export const DetailModal: React.FC<DetailModalProps> = ({
     <div
       className="dossier-backdrop"
       onClick={onClose}
-      role="dialog"
-      aria-modal="true"
-      aria-label={data.title}
+      role="presentation"
     >
-      <article ref={dossierRef} className="dossier" tabIndex={-1} onClick={(e) => e.stopPropagation()}>
-        <div className="dossier__rail">
-          <span className="dossier__rail-label">Globe News Atlas</span>
-          <span className="dossier__rail-divider">/</span>
-          <span className="dossier__rail-label">Event dossier</span>
-          <button type="button" data-autofocus className="dossier__close" onClick={onClose} aria-label={t('close')}>
-            <X size={18} />
-          </button>
-        </div>
+      <article
+        ref={dossierRef}
+        className="dossier"
+        role="dialog"
+        aria-modal="true"
+        aria-label={dialogLabel}
+        tabIndex={-1}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {dialogRail}
 
         <div className="dossier__scroll">
           <header className="dossier__header">
@@ -179,6 +219,9 @@ export const DetailModal: React.FC<DetailModalProps> = ({
               {data.location_name && <span className="dossier__dateline">{data.location_name}</span>}
               {data.is_single_source && (
                 <span className="dossier__flag">{t('single_source_account')}</span>
+              )}
+              {data.has_coverage_gap && (
+                <span className="dossier__flag dossier__flag--gap">{t('coverage_gap')}</span>
               )}
             </div>
 
@@ -216,9 +259,14 @@ export const DetailModal: React.FC<DetailModalProps> = ({
                     {t('single_source_caveat')}
                   </p>
                 )}
+                {data.has_coverage_gap && (
+                  <p className="dossier__caveat dossier__caveat--gap">
+                    {t('coverage_gap_caveat')}
+                  </p>
+                )}
               </section>
 
-              {data.sources.length === 1 && !showExcerpt && primarySource && (
+              {sourcesShown === 1 && sourcesTotal === 1 && !showExcerpt && primarySource && (
                 <section className="dossier-section">
                   <div className="dossier-section__head">
                     <h3>{t('original_report')}</h3>
@@ -237,6 +285,9 @@ export const DetailModal: React.FC<DetailModalProps> = ({
                     <span className="report-card__outlet">
                       {primarySource.outlet_name}
                       <span className="report-card__alignment">{primarySource.alignment}</span>
+                      {primarySource.via_google_news && (
+                        <span className="via-google">{t('via_google_news')}</span>
+                      )}
                       <ExternalLink size={11} />
                     </span>
                     <span className="report-card__title">{primarySource.title}</span>
@@ -299,7 +350,11 @@ export const DetailModal: React.FC<DetailModalProps> = ({
                                 >
                                   <span>{headline.title}</span>
                                   <span className="coverage-row__outlet">
-                                    {headline.outlet} <ExternalLink size={10} />
+                                    {headline.outlet}{' '}
+                                    {headline.via_google_news && (
+                                      <span className="via-google">{t('via_google_news')}</span>
+                                    )}{' '}
+                                    <ExternalLink size={10} />
                                   </span>
                                 </a>
                               </li>
@@ -424,11 +479,22 @@ export const DetailModal: React.FC<DetailModalProps> = ({
                 )}
               </section>
 
-              {data.sources.length !== 1 && (
+              {sourcesTotal > 1 && (
               <section className="aside-block aside-block--sources">
                 <h3 className="aside-block__title">
-                  {t('sources')} <span>{data.sources.length}</span>
+                  {t('sources')}{' '}
+                  <span>
+                    {sourcesSampled
+                      ? t('sources_shown_of_total_short', {
+                          shown: sourcesShown,
+                          total: sourcesTotal,
+                        })
+                      : t('sources_count', { count: sourcesShown })}
+                  </span>
                 </h3>
+                {sourcesSampled && (
+                  <p className="dossier__fineprint">{t('sources_sampled_note')}</p>
+                )}
                 {data.sources.length > 0 ? (
                   <ol className="source-list">
                     {data.sources.map((src, index) => (
@@ -443,6 +509,9 @@ export const DetailModal: React.FC<DetailModalProps> = ({
                             <span className="source-list__outlet">
                               {src.outlet_name}
                               <span className="source-list__alignment">{src.alignment === 'unrated' ? t('unrated') : t(src.alignment, src.alignment)}</span>
+                              {src.via_google_news && (
+                                <span className="via-google">{t('via_google_news')}</span>
+                              )}
                             </span>
                             <span className="source-list__title">{src.title}</span>
                             {src.snippet && <span className="source-list__snippet">{src.snippet}</span>}
@@ -473,6 +542,11 @@ export const DetailModal: React.FC<DetailModalProps> = ({
                       </span>
                     )}
                   </div>
+                  <p className="dossier__fineprint">
+                    {t('public_discussion_counts_only', {
+                      count: data.reddit_threads + data.bluesky_posts,
+                    })}
+                  </p>
                 </section>
               )}
             </aside>
