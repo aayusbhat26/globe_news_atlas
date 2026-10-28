@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Bookmark, FileSearch, History, Layers, Waypoints } from 'lucide-react';
+import { Bookmark, FileSearch, History, Layers, MessagesSquare, Waypoints } from 'lucide-react';
 import { navigate } from '../../router';
 
 const ITEMS = [
@@ -26,6 +26,12 @@ const ITEMS = [
     label: 'Atlas Rewind',
     detail: 'Play back the last days of coverage',
     icon: History,
+  },
+  {
+    path: '/x-desk',
+    label: 'X Desk',
+    detail: 'Live newsroom timelines through X’s official embed',
+    icon: MessagesSquare,
   },
 ];
 

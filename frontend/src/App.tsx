@@ -26,6 +26,7 @@ import { WatchlinePage } from './components/Editions/WatchlinePage';
 import { StorylinesPage } from './components/Editions/StorylinesPage';
 import { ThinFilePage } from './components/Editions/ThinFilePage';
 import { RewindPage } from './components/Editions/RewindPage';
+import { XDeskPage } from './components/Editions/XDeskPage';
 import { EventPage } from './components/Editions/EventPage';
 import { EmbedPage } from './components/Editions/EmbedPage';
 import { PageShell } from './components/Editions/PageShell';
@@ -454,6 +455,9 @@ export const App: React.FC = () => {
   }
   if (pathname === '/rewind') {
     return <RewindPage />;
+  }
+  if (pathname === '/x-desk') {
+    return <XDeskPage />;
   }
   if (embedMatch) {
     return <EmbedPage eventId={decodePathSegment(embedMatch[1])} />;

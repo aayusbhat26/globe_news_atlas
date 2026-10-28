@@ -42,7 +42,11 @@ const PRIVACY = [
   },
   {
     title: 'Cookies and local storage',
-    body: 'The session cookie is HttpOnly and holds an opaque token; the server stores only its hash. A signed CSRF cookie protects state-changing requests. A short-lived OAuth cookie binds Google sign-in to your browser. Theme, language and interface state are kept in local storage. There are no advertising or cross-site tracking cookies.',
+    body: 'The session cookie is HttpOnly and holds an opaque token; the server stores only its hash. A signed CSRF cookie protects state-changing requests. A short-lived OAuth cookie binds Google sign-in to your browser. Theme, language and interface state are kept in local storage. There are no advertising or cross-site tracking cookies on the Atlas, account, event or edition pages. The optional X desk loads X’s official embed only after you choose to load it, and X’s own cookies and privacy policy apply there.',
+  },
+  {
+    title: 'The optional X desk',
+    body: 'The X desk is a separate page. It loads X’s official embedded timelines for a curated set of newsroom accounts only after you choose to load them. When loaded, X may set cookies and collect data under X’s privacy policy; this is the only place in the Atlas that loads a third-party social widget. The map, dossiers, account area and editions do not load X widgets. X posts are displayed by X and are not stored or ingested into the Atlas event pipeline.',
   },
   {
     title: 'Email and Google',

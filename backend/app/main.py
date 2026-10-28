@@ -148,6 +148,24 @@ SPA_CSP = (
     "object-src 'none'"
 )
 
+# The X desk is the only page allowed to load the official X widget. It remains
+# opt-in in the UI; no other route gets these third-party origins.
+SOCIAL_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'sha256-fAdI4fwecFT5mhxHsTVu7fm1q1zvs+indMMKVmA5gN0=' "
+    "https://platform.twitter.com https://cdn.syndication.twimg.com https://abs.twimg.com; "
+    "style-src 'self' 'unsafe-inline' https://ton.twimg.com https://platform.twitter.com; "
+    "font-src 'self' https://ton.twimg.com https://abs.twimg.com; "
+    "img-src 'self' data: https:; "
+    "media-src 'self' https:; "
+    "connect-src 'self' https://syndication.twitter.com https://cdn.syndication.twimg.com https://api.x.com; "
+    "frame-src https://syndication.twitter.com https://platform.twitter.com; "
+    "frame-ancestors 'self'; "
+    "base-uri 'self'; "
+    "form-action 'self'; "
+    "object-src 'none'"
+)
+
 
 @app.middleware("http")
 async def cache_and_security_headers(request, call_next):
@@ -172,6 +190,9 @@ async def cache_and_security_headers(request, call_next):
     if path.startswith("/embed/"):
         # Public event cards are meant to be framed; nothing else is.
         response.headers["Content-Security-Policy"] = "frame-ancestors *"
+    elif path == "/x-desk" or path.startswith("/x-desk/"):
+        response.headers["Content-Security-Policy"] = SOCIAL_CSP
+        response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
     elif content_type.startswith("text/html"):
         # SPA pages: scripts/fonts from self, inline styles (React style props),
         # images from self/data/https, fetch + SSE to self only.
@@ -280,6 +301,7 @@ if (frontend_dist / "index.html").exists():
             (f"{base}/storylines", page_lastmod, "hourly", "0.7"),
             (f"{base}/thin-file", page_lastmod, "hourly", "0.7"),
             (f"{base}/rewind", page_lastmod, "daily", "0.6"),
+            (f"{base}/x-desk", page_lastmod, "daily", "0.5"),
             (f"{base}/privacy", page_lastmod, "yearly", "0.2"),
             (f"{base}/terms", page_lastmod, "yearly", "0.2"),
         ]

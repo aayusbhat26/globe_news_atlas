@@ -61,6 +61,9 @@ export const PageShell: React.FC<PageShellProps> = ({
           <button type="button" onClick={() => navigate('/thin-file')}>
             Thin File
           </button>
+          <button type="button" onClick={() => navigate('/x-desk')}>
+            X Desk
+          </button>
         </nav>
 
         <div className="page-topbar__actions">
@@ -117,6 +120,7 @@ export const PageShell: React.FC<PageShellProps> = ({
           <button type="button" onClick={() => navigate('/storylines')}>Storylines</button>
           <button type="button" onClick={() => navigate('/thin-file')}>Thin File</button>
           <button type="button" onClick={() => navigate('/rewind')}>Rewind</button>
+          <button type="button" onClick={() => navigate('/x-desk')}>X Desk</button>
           <button type="button" onClick={() => navigate('/')}>Atlas</button>
         </nav>
       </footer>
